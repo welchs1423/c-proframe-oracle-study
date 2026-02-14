@@ -1,71 +1,89 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "sqlca.h"
+#include <sqlda.h>
+#include <sqlca.h>
+
+EXEC SQL INCLUDE sqlca;
 
 void sql_error(char *msg) {
-    printf("\n%s: %.*s\n", msg, sqlca.sqlerrm.sqlerrml, sqlca.sqlerrm.sqlerrmc);
-    EXEC SQL ROLLBACK RELEASE;
+    printf("\n%s\n",msg);
+    printf("SQL 에러 코드: %d\n", sqlca.sqlcode);
+    printf("에러 메시지: %.*s\n", sqlca.sqlerrm.sqlerrml, sqlca.sqlerrm.sqlerrmc);
+    EXEC SQL ROLLBACK WORK RELEASE;
     exit(1);
 }
 
 int main() {
-    // 1. 변수 선언 섹션 (여기엔 printf가 들어가면 안 됩니다!)
+    // 호스트 변수 선언
     EXEC SQL BEGIN DECLARE SECTION;
-        char db_user[20] = "system";
-        char db_pass[20] = "Password123!";
-        // 주소를 직접 적어서 연결 지연 해결
-        char db_svc[60] = "127.0.0.1:1521/xepdb1"; 
-        
+        char *user_id = "system/Password123!@127.0.0.1:1521/xepdb1";
         char acc_no[20];
-        VARCHAR user_name[40];
-        long balance;
-        long deposit_amt = 500000;
+        VARCHAR user_name[20];
+        long current_balance;
+        long withdraw_amount = 1000000; // 출금 시도 금액
     EXEC SQL END DECLARE SECTION;
 
-    // 2. 실제 코드 시작
     printf("1. 프로그램 시작...\n");
 
-    // 3. DB 연결
-    printf("2. DB 연결 시도 중 (127.0.0.1:1521/xepdb1)...\n");
-    EXEC SQL CONNECT :db_user IDENTIFIED BY :db_pass USING :db_svc;
-    
-    if (sqlca.sqlcode != 0) sql_error("DB 연결 실패");
-    printf("3. 오라클 DB 연결 성공!\n");
+    // DB 연결
+    EXEC SQL CONNECT :user_id;
+    if(sqlca.sqlcode < 0) sql_error("DB 연결 실패!");
+    printf("2. 오라클 DB 연결 성공!\n");
 
-    // 4. 현재 정보 조회
-    EXEC SQL SELECT ACC_NO, TRIM(USER_NAME), BALANCE
-             INTO :acc_no, :user_name, :balance
-             FROM ACCOUNT
-             WHERE ACC_NO = '110-123-456';
+    strcpy(acc_no, "110-123-456");
+
+    // 현재 정보 조회
+    EXEC SQL SELECT USER_NAME, BALANCE
+         INTO :user_name, :current_balance
+         FROM ACCOUNT
+         WHERE ACC_NO = :acc_no;
+
+    if(sqlca.sqlcode == 1403){
+        printf("에러: 해당 계좌를 찾을 수 없습니다.\n");
+        EXEC SQL ROLLBACK RELEASE;
+        return 1;
+    }
+
+    user_name.arr[user_name.len] = '\0';
 
     printf("\n[조회 결과]\n");
     printf("계좌번호: %s\n", acc_no);
-    printf("고객명  : %.*s\n", user_name.len, user_name.arr);
-    printf("현재잔액: %ld\n", balance);
-
-    // 5. 입금 기능 실행
-    printf("\n--- %ld원 입금 시도 중 ---\n", deposit_amt);
+    printf("고객명 : %s\n", user_name.arr);
+    printf("현재잔액: %ld\n", current_balance);
     
-    EXEC SQL UPDATE ACCOUNT
-             SET BALANCE = BALANCE + :deposit_amt
-             WHERE ACC_NO = '110-123-456';
+    // 출금 로직
+    printf("\n--- %ld원 출금 시도 중 ---\n", withdraw_amount);
 
-    if (sqlca.sqlcode == 0) {
-        printf("성공: 데이터가 업데이트되었습니다.\n");
-        EXEC SQL COMMIT;
+    // 잔액 부족 체크
+    if (current_balance < withdraw_amount){
+        printf("결과: [실패] 잔액이 부족합니다. (현재 잔액: %ld원)\n", current_balance);
+        // 더 진행하지 않음
     } else {
-        sql_error("입금 실패");
+        EXEC SQL UPDATE ACCOUNT
+            SET BALANCE = BALANCE - :withdraw_amount
+            WHERE ACC_NO = :acc_no;
+
+        if(sqlca.sqlcode == 0){
+            EXEC SQL COMMIT;
+            printf("결과: [성공] 데이터가 업데이트되었습니다.\n");
+        } else {
+            EXEC SQL ROLLBACK;
+            printf("결과: [오류] 업데이트 중 DB 에러 발생\n");
+        }
     }
 
-    // 6. 최종 잔액 재확인
-    EXEC SQL SELECT BALANCE INTO :balance
-             FROM ACCOUNT
-             WHERE ACC_NO = '110-123-456';
-             
-    printf("\n[입금 후 최종 잔액]: %ld\n", balance);
+    EXEC SQL SELECT BALANCE INTO :current_balance
+          FROM ACCOUNT
+          WHERE ACC_NO = :acc_no;
+    
+    printf("\n[최정 처리 결과]\n");
+    printf("계좌번호: %s\n", acc_no);
+    printf("최종잔액: %ld\n", current_balance);
     printf("--------------------------\n");
 
     EXEC SQL COMMIT WORK RELEASE;
+    printf("프로그램 종료.\n");
+
     return 0;
 }
