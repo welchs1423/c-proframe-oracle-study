@@ -24,38 +24,6 @@ C 언어와 Oracle의 통신을 위해 `libaio1` 패키지 설치.
 ```bash
 sudo apt-get update
 sudo apt-get install -y libaio1
-
-아차! 중간에 들어간 bash 코드 블록(```) 때문에 마크다운 블록이 중간에 끊겨버렸네요. 바보 같은 실수를 했습니다! 😅
-
-이번에는 중간에 끊기지 않도록 완벽하게 마크다운 블록 하나로 통째로 감싸서 드립니다. 바로 우측 상단의 '복사' 버튼을 눌러서 가져가세요!
-
-Markdown
-# C-Stock ATM
-오라클 데이터베이스와 Pro*C를 활용하여 코어 뱅킹(Core Banking) 시스템의 필수 로직을 구현한 콘솔 ATM 애플리케이션입니다.
-
-## 🛠️ 기술 스택 및 환경 (Tech Stack & Environment)
-- **Language**: C (Oracle Pro*C)
-- **Database**: Oracle Database 21c (XE)
-- **Infrastructure**: Docker (Oracle Container), WSL2 (Ubuntu)
-- **Compiler**: GCC, `proc` (Oracle Precompiler)
-- **Version Control**: Git, GitHub
-
-## 🧠 핵심 구현 기술 (Key Technologies)
-- **Embedded SQL**: C 코드 내부에 SQL을 직접 삽입하고 호스트 변수를 바인딩하여 DB와 실시간으로 통신하는 로직 구현.
-- **Transaction Management**: 계좌 이체 시 출금과 입금 중 하나라도 실패하면 전체 작업을 취소(`ROLLBACK`)하고, 모두 성공 시에만 반영(`COMMIT`)하는 데이터 무결성(Atomicity) 제어.
-- **Cursor Data Fetching**: `DECLARE`, `OPEN`, `FETCH`, `CLOSE` 사이클과 C 언어 루프 제어를 결합하여, 다수의 거래 내역을 안전하게 가져오는 다중 행(Multi-row) 조회 기능 구현.
-- **Data Type Conversion**: 오라클 전용 `VARCHAR` 구조체 타입과 C 언어의 `char*` 문자열 간의 형변환 및 널문자(`\0`) 수동 제어를 통한 데이터 잘림(Truncation) 방지.
-- **Modular Architecture**: 단일 `main()` 함수에 몰려있던 스파게티 코드를 기능별(로그인, 조회, 입금, 출금, 이체 등)로 분리하여 유지보수성 극대화.
-
----
-
-## 📖 공통 가이드 및 환경 설정
-
-### 1. 필수 라이브러리 설치
-C 언어와 Oracle의 통신을 위해 `libaio1` 패키지 설치.
-```bash
-sudo apt-get update
-sudo apt-get install -y libaio1
 ```
 
 ### 2. Pro*C 컴파일 및 실행 가이드
