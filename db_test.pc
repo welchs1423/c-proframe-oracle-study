@@ -24,9 +24,8 @@ EXEC SQL BEGIN DECLARE SECTION;
     long amount;
     char target_acc[20];
     VARCHAR target_name[40];
-    long target_bal; /* 🔥 에러 원인 해결: 호스트 변수 선언부로 이동 */
+    long target_bal;
 
-    /* 거래 내역(HISTORY) 전용 변수 */
     char h_acc_no[20];
     char h_trans_type[20];
     long h_amount;
@@ -247,7 +246,6 @@ void withdraw() {
 }
 
 void transfer() {
-    /* 🔥 target_bal 지역 변수 선언 제거됨 (위쪽 DECLARE SECTION으로 이동) */
     printf("\n대상 계좌번호: ");
     scanf("%s", target_acc);
     
@@ -318,6 +316,37 @@ void change_password() {
     printf("[성공] 비밀번호가 변경되었습니다.\n");
 }
 
+int delete_account() {
+    char cur_pw[15];
+    char bal_str[50];
+    
+    printf("\n--- [계좌 해지] ---\n");
+    
+    EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    if (current_balance > 0) {
+        format_comma(current_balance, bal_str);
+        printf("[실패] 잔액이 남아있습니다. 전액 출금 또는 이체 후 해지해주세요.\n(현재 잔액: %s원)\n", bal_str);
+        return 0;
+    }
+
+    printf("해지를 진행하려면 비밀번호를 다시 입력하세요: ");
+    scanf("%s", cur_pw);
+
+    EXEC SQL SELECT PASSWD INTO :db_p FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    trim_string(db_p, 15);
+
+    if (strcmp(cur_pw, db_p) != 0) {
+        printf("[실패] 비밀번호가 일치하지 않습니다.\n");
+        return 0;
+    }
+
+    EXEC SQL DELETE FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    EXEC SQL COMMIT;
+
+    printf("[성공] 계좌(%s)가 정상적으로 해지되었습니다. 그동안 이용해 주셔서 감사합니다.\n", acc_no);
+    return 1;
+}
+
 /* =========================================
    [4] 메인 프로그램 (라우팅 제어)
    ========================================= */
@@ -372,7 +401,8 @@ int main() {
                 printf("4. 출금\n");
                 printf("5. 계좌 이체\n");
                 printf("6. 비밀번호 변경\n");
-                printf("7. 로그아웃\n");
+                printf("7. 계좌 해지\n"); 
+                printf("8. 로그아웃\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -382,7 +412,10 @@ int main() {
                 else if (choice == 4) withdraw();
                 else if (choice == 5) transfer();
                 else if (choice == 6) change_password();
-                else if (choice == 7) break;
+                else if (choice == 7) {
+                    if (delete_account() == 1) break; 
+                }
+                else if (choice == 8) break;
             }
         }
     }
