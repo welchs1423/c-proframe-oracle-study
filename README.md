@@ -10,10 +10,18 @@
 - **Embedded SQL & Transaction**: 호스트 변수 바인딩 및 `COMMIT/ROLLBACK` 기반 송금 무결성 제어.
 - **Cursor Data Fetching**: `DECLARE-OPEN-FETCH` 사이클을 활용한 다중 행 데이터 처리.
 - **Modular Architecture**: 기능별(로그인, 입출금, 이체, 내역 조회) 함수 분리 및 모듈화.
+- **Account Lock Policy**: 비밀번호 연속 오류 횟수(FAIL_CNT) 추적 및 임계값 초과 시 자동 잠금(IS_LOCKED) 처리.
 
 ---
 
 ## 📅 구현 기능 내역 (Key Features)
+
+### [2026-04-12] 비밀번호 오류 횟수 초과 시 계좌 잠금 및 관리자 잠금 해제
+- ACCOUNT 테이블에 `FAIL_CNT`(오류 횟수), `IS_LOCKED`(잠금 여부) 컬럼을 추가하여 잠금 상태를 DB에서 영속적으로 관리.
+- 로그인 시 `IS_LOCKED = 'Y'` 여부를 비밀번호 입력 전 선확인하여 잠긴 계좌의 접근을 차단.
+- 비밀번호 오류 시 `FAIL_CNT`를 1씩 증가시키고, 3회 이상 누적되면 `IS_LOCKED = 'Y'`로 자동 잠금 처리.
+- 로그인 성공 시 `FAIL_CNT`를 0으로 초기화하여 정상 복구 경로 보장.
+- 관리자 메뉴에 '잠긴 계좌 해제' 기능(`unlock_account`) 추가 — 계좌번호 입력만으로 `FAIL_CNT = 0`, `IS_LOCKED = 'N'` 일괄 초기화.
 
 ### [2026-03-26] 신규 계좌 개설 (Sign Up) 기능 추가
 - `INSERT INTO` 구문을 활용한 신규 계정(ACCOUNT) 생성 로직 구현.
