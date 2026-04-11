@@ -6,3 +6,6 @@ db_test.c
 
 # 기타 임시 파일
 *.o
+
+# Claude Code 프로젝트 가이드
+CLAUDE.md
