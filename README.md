@@ -11,10 +11,20 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - **Cursor Data Fetching**: Multi-row data processing using the `DECLARE-OPEN-FETCH` cycle.
 - **Modular Architecture**: Function-level separation by feature (login, deposit/withdraw, transfer, history).
 - **Account Lock Policy**: Tracks consecutive password failures (FAIL_CNT) and automatically locks accounts (IS_LOCKED) upon exceeding the threshold.
+- **Grade-based Fee System**: Differential transfer fee logic — NORMAL accounts incur a 500 KRW fee per transfer; VIP accounts are exempt.
 
 ---
 
 ## 📅 Feature History
+
+### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic
+- Added `GRADE` column (`VARCHAR2(10)`, default `'NORMAL'`) to the ACCOUNT table via `ALTER TABLE`.
+- On login, `GRADE` is fetched from DB and stored in a global host variable; displayed in the welcome message and balance view.
+- Transfer fee rules by grade:
+  - **NORMAL**: requires `balance >= amount + 500`; deducts both and records a separate `'수수료'` (fee) entry in HISTORY.
+  - **VIP**: no fee — transfer amount only, confirmed with a "(VIP — 수수료 없음)" message.
+- Added admin menu option **"4. VIP 등급 부여"** (`grant_vip` function): accepts an account number and updates its GRADE to `'VIP'`.
+- Admin account list now shows the GRADE column for all accounts.
 
 ### [2026-04-12] Account Lock on Password Failures & Admin Unlock
 - Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.

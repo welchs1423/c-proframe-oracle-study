@@ -16,6 +16,7 @@ EXEC SQL BEGIN DECLARE SECTION;
     char n_pw[15];
     char db_p[15];
     char db_role[2];
+    char db_grade[11];   /* 로그인 사용자 등급 ('NORMAL' or 'VIP') */
 
     char a_acc_no[20];
     VARCHAR a_user_name[40];
@@ -35,6 +36,9 @@ EXEC SQL BEGIN DECLARE SECTION;
     /* 계좌 잠금 관련 호스트 변수 */
     char is_locked[2];
     int  fail_cnt;
+
+    /* VIP 부여용 */
+    char a_grade[11];
 EXEC SQL END DECLARE SECTION;
 
 /* =========================================
@@ -109,9 +113,9 @@ int login() {
     printf("\n계좌번호 입력: ");
     scanf("%s", acc_no);
 
-    /* IS_LOCKED, FAIL_CNT 포함하여 계좌 정보 조회 */
-    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT
-             INTO :user_name, :db_pw, :db_role, :is_locked, :fail_cnt
+    /* IS_LOCKED, FAIL_CNT, GRADE 포함하여 계좌 정보 조회 */
+    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT, GRADE
+             INTO :user_name, :db_pw, :db_role, :is_locked, :fail_cnt, :db_grade
              FROM ACCOUNT WHERE ACC_NO = :acc_no;
 
     if (sqlca.sqlcode == 1403) {
@@ -155,7 +159,8 @@ int login() {
     EXEC SQL COMMIT;
 
     user_name.arr[user_name.len] = '\0';
-    printf("\n[환영합니다] %s님 접속 성공!\n", user_name.arr);
+    trim_string(db_grade, 11);
+    printf("\n[환영합니다] %s님 접속 성공! (등급: %s)\n", user_name.arr, db_grade);
 
     if (db_role[0] == 'A') return 2;
     return 1;
@@ -169,22 +174,23 @@ void admin_view_accounts() {
     printf("\n==================================================\n");
     printf("           [관리자 모드] 전체 계좌 현황\n");
     printf("==================================================\n");
-    printf("%-15s | %-15s | %s\n", "계좌번호", "고객명", "잔액(원)");
+    printf("%-15s | %-15s | %-8s | %s\n", "계좌번호", "고객명", "등급", "잔액(원)");
     printf("--------------------------------------------------\n");
 
     EXEC SQL DECLARE acc_cursor CURSOR FOR
-        SELECT ACC_NO, USER_NAME, BALANCE FROM ACCOUNT ORDER BY ACC_NO;
+        SELECT ACC_NO, USER_NAME, BALANCE, GRADE FROM ACCOUNT ORDER BY ACC_NO;
 
     EXEC SQL OPEN acc_cursor;
     EXEC SQL WHENEVER NOT FOUND DO break;
 
     while (1) {
-        EXEC SQL FETCH acc_cursor INTO :a_acc_no, :a_user_name, :a_balance;
+        EXEC SQL FETCH acc_cursor INTO :a_acc_no, :a_user_name, :a_balance, :a_grade;
         a_user_name.arr[a_user_name.len] = '\0';
         format_comma(a_balance, balance_str);
         trim_string(a_acc_no, 20);
+        trim_string(a_grade, 11);
 
-        printf("%-15s | %-15s | %15s\n", a_acc_no, a_user_name.arr, balance_str);
+        printf("%-15s | %-15s | %-8s | %15s\n", a_acc_no, a_user_name.arr, a_grade, balance_str);
         count++;
     }
 
@@ -218,6 +224,31 @@ void unlock_account() {
 
     trim_string(a_acc_no, 20);
     printf("[성공] 계좌(%s)의 잠금이 해제되었습니다.\n", a_acc_no);
+}
+
+void grant_vip() {
+    printf("\n--- [VIP 등급 부여] ---\n");
+    printf("VIP로 승급할 계좌번호 입력: ");
+    scanf("%s", a_acc_no);
+
+    EXEC SQL SELECT GRADE INTO :a_grade FROM ACCOUNT WHERE ACC_NO = :a_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    trim_string(a_grade, 11);
+    if (strcmp(a_grade, "VIP") == 0) {
+        printf("[안내] 해당 계좌는 이미 VIP 등급입니다.\n");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET GRADE = 'VIP' WHERE ACC_NO = :a_acc_no;
+    EXEC SQL COMMIT;
+
+    trim_string(a_acc_no, 20);
+    printf("[성공] 계좌(%s)가 VIP 등급으로 승급되었습니다.\n", a_acc_no);
 }
 
 /* --- [고객 뱅킹 기능] --- */
@@ -255,7 +286,7 @@ void check_balance() {
     char bal_str[50];
     EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
     format_comma(current_balance, bal_str);
-    printf("\n현재 잔액: %s원\n", bal_str);
+    printf("\n현재 잔액: %s원 (등급: %s)\n", bal_str, db_grade);
 }
 
 void deposit() {
@@ -303,6 +334,9 @@ void withdraw() {
 }
 
 void transfer() {
+    long fee = 0;
+    char fee_str[50];
+
     printf("\n대상 계좌번호: ");
     scanf("%s", target_acc);
 
@@ -312,24 +346,50 @@ void transfer() {
         return;
     }
 
+    /* NORMAL 등급인 경우 수수료 500원 부과 */
+    if (strcmp(db_grade, "NORMAL") == 0) {
+        fee = 500;
+    }
+
     printf("이체할 금액: ");
     scanf("%ld", &amount);
 
     EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
-    if (current_balance < amount) {
-        printf("[실패] 잔액 부족.\n");
+
+    if (current_balance < amount + fee) {
+        if (fee > 0) {
+            printf("[실패] 잔액 부족 (수수료 500원 포함). 필요 금액: %ld원, 현재 잔액: %ld원\n",
+                   amount + fee, current_balance);
+        } else {
+            printf("[실패] 잔액 부족.\n");
+        }
         return;
     }
 
-    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :amount WHERE ACC_NO = :acc_no;
-    current_balance -= amount;
+    /* 이체 금액 + 수수료 차감 */
+    long total_deduct = amount + fee;
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :total_deduct WHERE ACC_NO = :acc_no;
+    current_balance -= total_deduct;
 
+    /* 이체출금 내역 저장 (이체 금액만) */
     strcpy(h_acc_no, acc_no);
     strcpy(h_trans_type, "이체출금");
     h_amount = amount;
     h_balance_after = current_balance;
-    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER) VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
 
+    /* NORMAL 등급: 수수료 내역 별도 저장 */
+    if (fee > 0) {
+        strcpy(h_acc_no, acc_no);
+        strcpy(h_trans_type, "수수료");
+        h_amount = fee;
+        h_balance_after = current_balance;
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
+    }
+
+    /* 수신 계좌에 이체 금액 입금 */
     EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :amount WHERE ACC_NO = :target_acc;
     EXEC SQL SELECT BALANCE INTO :target_bal FROM ACCOUNT WHERE ACC_NO = :target_acc;
 
@@ -337,12 +397,20 @@ void transfer() {
     strcpy(h_trans_type, "이체입금");
     h_amount = amount;
     h_balance_after = target_bal;
-    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER) VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
 
     EXEC SQL COMMIT;
 
     target_name.arr[target_name.len] = '\0';
-    printf("[%s]님에게 %ld원 이체 완료.\n", target_name.arr, amount);
+    if (fee > 0) {
+        format_comma(fee, fee_str);
+        printf("[%s]님에게 %ld원 이체 완료. (수수료 %s원 차감)\n",
+               target_name.arr, amount, fee_str);
+    } else {
+        printf("[%s]님에게 %ld원 이체 완료. (VIP — 수수료 없음)\n",
+               target_name.arr, amount);
+    }
 }
 
 void change_password() {
@@ -443,12 +511,14 @@ int main() {
                 printf("1. 전체 계좌 현황 조회\n");
                 printf("2. 로그아웃\n");
                 printf("3. 잠긴 계좌 해제\n");
+                printf("4. VIP 등급 부여\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
                 if (choice == 1) admin_view_accounts();
                 else if (choice == 2) break;
                 else if (choice == 3) unlock_account();
+                else if (choice == 4) grant_vip();
             }
         }
         else if (login_status == 1) {
