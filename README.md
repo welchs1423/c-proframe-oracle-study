@@ -17,6 +17,15 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 
 ## 📅 Feature History
 
+### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic & Overdraft (Minus Account) Feature
+- Added `CREDIT_LIMIT` column (`NUMBER`, default `0`) to the ACCOUNT table via `ALTER TABLE`.
+- On login, `CREDIT_LIMIT` is fetched and stored in a global host variable (`credit_limit`).
+- Withdrawal/transfer balance check updated: blocks only when `(current_balance + credit_limit) < requested_amount`, allowing the actual `BALANCE` to go negative within the limit.
+- Balance view (`check_balance`) now displays the overdraft limit and remaining available amount alongside the current balance.
+- `format_comma` updated to correctly format negative amounts with a leading minus sign.
+- Account closure (`delete_account`) now blocks if balance is non-zero in either direction (positive or negative).
+- Added admin menu option **"5. 마이너스 한도 부여"** (`grant_credit` function): accepts an account number and a limit amount, then updates `CREDIT_LIMIT` via `UPDATE`.
+
 ### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic
 - Added `GRADE` column (`VARCHAR2(10)`, default `'NORMAL'`) to the ACCOUNT table via `ALTER TABLE`.
 - On login, `GRADE` is fetched from DB and stored in a global host variable; displayed in the welcome message and balance view.
@@ -26,7 +35,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - Added admin menu option **"4. VIP 등급 부여"** (`grant_vip` function): accepts an account number and updates its GRADE to `'VIP'`.
 - Admin account list now shows the GRADE column for all accounts.
 
-### [2026-04-12] Account Lock on Password Failures & Admin Unlock
+### Account Lock on Password Failures & Admin Unlock
 - Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.
 - On login, `IS_LOCKED = 'Y'` is checked before prompting for a password, blocking access to locked accounts.
 - Each wrong password increments `FAIL_CNT` by 1; reaching 3 failures automatically sets `IS_LOCKED = 'Y'`.

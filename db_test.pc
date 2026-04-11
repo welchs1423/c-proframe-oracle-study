@@ -11,6 +11,7 @@ EXEC SQL BEGIN DECLARE SECTION;
     char acc_no[20];
     VARCHAR user_name[40];
     long current_balance;
+    long credit_limit;     /* 마이너스 통장 한도 */
 
     char db_pw[15];
     char n_pw[15];
@@ -45,6 +46,14 @@ EXEC SQL END DECLARE SECTION;
    [2] 공통 유틸리티 함수
    ========================================= */
 void format_comma(long amt, char *out_str) {
+    /* 음수 처리 */
+    if (amt < 0) {
+        char pos_str[50];
+        format_comma(-amt, pos_str);
+        sprintf(out_str, "-%s", pos_str);
+        return;
+    }
+
     char temp[50];
     sprintf(temp, "%ld", amt);
     int len = strlen(temp);
@@ -113,9 +122,9 @@ int login() {
     printf("\n계좌번호 입력: ");
     scanf("%s", acc_no);
 
-    /* IS_LOCKED, FAIL_CNT, GRADE 포함하여 계좌 정보 조회 */
-    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT, GRADE
-             INTO :user_name, :db_pw, :db_role, :is_locked, :fail_cnt, :db_grade
+    /* IS_LOCKED, FAIL_CNT, GRADE, CREDIT_LIMIT 포함하여 계좌 정보 조회 */
+    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT, GRADE, CREDIT_LIMIT
+             INTO :user_name, :db_pw, :db_role, :is_locked, :fail_cnt, :db_grade, :credit_limit
              FROM ACCOUNT WHERE ACC_NO = :acc_no;
 
     if (sqlca.sqlcode == 1403) {
@@ -251,6 +260,41 @@ void grant_vip() {
     printf("[성공] 계좌(%s)가 VIP 등급으로 승급되었습니다.\n", a_acc_no);
 }
 
+void grant_credit() {
+    long new_limit;
+    char limit_str[50];
+
+    printf("\n--- [마이너스 한도 부여] ---\n");
+    printf("한도를 부여할 계좌번호 입력: ");
+    scanf("%s", a_acc_no);
+
+    EXEC SQL SELECT CREDIT_LIMIT INTO :amount FROM ACCOUNT WHERE ACC_NO = :a_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    format_comma(amount, limit_str);
+    printf("현재 마이너스 한도: %s원\n", limit_str);
+    printf("새로 부여할 한도 금액 입력 (0 입력 시 한도 제거): ");
+    scanf("%ld", &new_limit);
+
+    if (new_limit < 0) {
+        printf("[실패] 한도는 0 이상이어야 합니다.\n");
+        return;
+    }
+
+    /* amount 호스트 변수를 새 한도 값으로 재사용 */
+    amount = new_limit;
+    EXEC SQL UPDATE ACCOUNT SET CREDIT_LIMIT = :amount WHERE ACC_NO = :a_acc_no;
+    EXEC SQL COMMIT;
+
+    format_comma(new_limit, limit_str);
+    trim_string(a_acc_no, 20);
+    printf("[성공] 계좌(%s)의 마이너스 한도가 %s원으로 설정되었습니다.\n", a_acc_no, limit_str);
+}
+
 /* --- [고객 뱅킹 기능] --- */
 void view_history() {
     int count = 0;
@@ -283,10 +327,18 @@ void view_history() {
 }
 
 void check_balance() {
-    char bal_str[50];
-    EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    char bal_str[50], limit_str[50];
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT INTO :current_balance, :credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :acc_no;
     format_comma(current_balance, bal_str);
+    format_comma(credit_limit, limit_str);
     printf("\n현재 잔액: %s원 (등급: %s)\n", bal_str, db_grade);
+    if (credit_limit > 0) {
+        printf("마이너스 통장 한도: %s원 | 사용 가능 금액: ", limit_str);
+        char avail_str[50];
+        format_comma(current_balance + credit_limit, avail_str);
+        printf("%s원\n", avail_str);
+    }
 }
 
 void deposit() {
@@ -311,10 +363,14 @@ void deposit() {
 void withdraw() {
     printf("\n출금할 금액: ");
     scanf("%ld", &amount);
-    EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT INTO :current_balance, :credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :acc_no;
 
-    if (current_balance < amount) {
-        printf("[실패] 잔액이 부족합니다.\n");
+    /* 마이너스 통장 한도 포함 잔액 부족 검사 */
+    if ((current_balance + credit_limit) < amount) {
+        char avail_str[50];
+        format_comma(current_balance + credit_limit, avail_str);
+        printf("[실패] 한도 초과. 출금 가능 금액: %s원\n", avail_str);
         return;
     }
 
@@ -330,7 +386,9 @@ void withdraw() {
              VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
 
     EXEC SQL COMMIT;
-    printf("[%ld원] 출금 완료.\n", amount);
+    char bal_str[50];
+    format_comma(current_balance, bal_str);
+    printf("[%ld원] 출금 완료. 현재 잔액: %s원\n", amount, bal_str);
 }
 
 void transfer() {
@@ -354,14 +412,18 @@ void transfer() {
     printf("이체할 금액: ");
     scanf("%ld", &amount);
 
-    EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT INTO :current_balance, :credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :acc_no;
 
-    if (current_balance < amount + fee) {
+    /* 마이너스 통장 한도 포함 잔액 부족 검사 */
+    if ((current_balance + credit_limit) < amount + fee) {
+        char avail_str[50];
+        format_comma(current_balance + credit_limit, avail_str);
         if (fee > 0) {
-            printf("[실패] 잔액 부족 (수수료 500원 포함). 필요 금액: %ld원, 현재 잔액: %ld원\n",
-                   amount + fee, current_balance);
+            printf("[실패] 한도 초과 (수수료 500원 포함). 이체 가능 금액: %s원, 요청: %ld원\n",
+                   avail_str, amount + fee);
         } else {
-            printf("[실패] 잔액 부족.\n");
+            printf("[실패] 한도 초과. 이체 가능 금액: %s원\n", avail_str);
         }
         return;
     }
@@ -448,9 +510,15 @@ int delete_account() {
     printf("\n--- [계좌 해지] ---\n");
 
     EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
-    if (current_balance > 0) {
+
+    /* 잔액이 0이 아닌 경우(플러스 또는 마이너스) 해지 불가 */
+    if (current_balance != 0) {
         format_comma(current_balance, bal_str);
-        printf("[실패] 잔액이 남아있습니다. 전액 출금 또는 이체 후 해지해주세요.\n(현재 잔액: %s원)\n", bal_str);
+        if (current_balance > 0) {
+            printf("[실패] 잔액이 남아있습니다. 전액 출금 또는 이체 후 해지해주세요.\n(현재 잔액: %s원)\n", bal_str);
+        } else {
+            printf("[실패] 마이너스 잔액이 남아있습니다. 전액 입금 후 해지해주세요.\n(현재 잔액: %s원)\n", bal_str);
+        }
         return 0;
     }
 
@@ -512,6 +580,7 @@ int main() {
                 printf("2. 로그아웃\n");
                 printf("3. 잠긴 계좌 해제\n");
                 printf("4. VIP 등급 부여\n");
+                printf("5. 마이너스 한도 부여\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -519,6 +588,7 @@ int main() {
                 else if (choice == 2) break;
                 else if (choice == 3) unlock_account();
                 else if (choice == 4) grant_vip();
+                else if (choice == 5) grant_credit();
             }
         }
         else if (login_status == 1) {
