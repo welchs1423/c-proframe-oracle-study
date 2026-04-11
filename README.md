@@ -1,65 +1,67 @@
 # C-Stock ATM
-오라클 DB와 Pro*C를 활용하여 코어 뱅킹 핵심 로직을 구현한 콘솔 ATM 애플리케이션입니다.
+A console-based ATM application implementing core banking logic using Oracle DB and Pro*C.
 
-## 🛠️ 기술 스택 및 환경
-- **언어 및 DB**: C (Oracle Pro*C), Oracle Database 21c (XE)
-- **환경**: Docker, WSL2 (Ubuntu), GCC Compiler
-- **버전 관리**: Git, GitHub
+## 🛠️ Tech Stack & Environment
+- **Language & DB**: C (Oracle Pro*C), Oracle Database 21c (XE)
+- **Environment**: Docker, WSL2 (Ubuntu), GCC Compiler
+- **Version Control**: Git, GitHub
 
-## 🧠 핵심 구현 기술
-- **Embedded SQL & Transaction**: 호스트 변수 바인딩 및 `COMMIT/ROLLBACK` 기반 송금 무결성 제어.
-- **Cursor Data Fetching**: `DECLARE-OPEN-FETCH` 사이클을 활용한 다중 행 데이터 처리.
-- **Modular Architecture**: 기능별(로그인, 입출금, 이체, 내역 조회) 함수 분리 및 모듈화.
-- **Account Lock Policy**: 비밀번호 연속 오류 횟수(FAIL_CNT) 추적 및 임계값 초과 시 자동 잠금(IS_LOCKED) 처리.
+## 🧠 Core Implementation
+- **Embedded SQL & Transactions**: Host variable binding with `COMMIT/ROLLBACK`-based transfer integrity control.
+- **Cursor Data Fetching**: Multi-row data processing using the `DECLARE-OPEN-FETCH` cycle.
+- **Modular Architecture**: Function-level separation by feature (login, deposit/withdraw, transfer, history).
+- **Account Lock Policy**: Tracks consecutive password failures (FAIL_CNT) and automatically locks accounts (IS_LOCKED) upon exceeding the threshold.
 
 ---
 
-## 📅 구현 기능 내역 (Key Features)
+## 📅 Feature History
 
-### [2026-04-12] 비밀번호 오류 횟수 초과 시 계좌 잠금 및 관리자 잠금 해제
-- ACCOUNT 테이블에 `FAIL_CNT`(오류 횟수), `IS_LOCKED`(잠금 여부) 컬럼을 추가하여 잠금 상태를 DB에서 영속적으로 관리.
-- 로그인 시 `IS_LOCKED = 'Y'` 여부를 비밀번호 입력 전 선확인하여 잠긴 계좌의 접근을 차단.
-- 비밀번호 오류 시 `FAIL_CNT`를 1씩 증가시키고, 3회 이상 누적되면 `IS_LOCKED = 'Y'`로 자동 잠금 처리.
-- 로그인 성공 시 `FAIL_CNT`를 0으로 초기화하여 정상 복구 경로 보장.
-- 관리자 메뉴에 '잠긴 계좌 해제' 기능(`unlock_account`) 추가 — 계좌번호 입력만으로 `FAIL_CNT = 0`, `IS_LOCKED = 'N'` 일괄 초기화.
+### [2026-04-12] Account Lock on Password Failures & Admin Unlock
+- Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.
+- On login, `IS_LOCKED = 'Y'` is checked before prompting for a password, blocking access to locked accounts.
+- Each wrong password increments `FAIL_CNT` by 1; reaching 3 failures automatically sets `IS_LOCKED = 'Y'`.
+- Successful login resets `FAIL_CNT` to 0, restoring normal access.
+- Added `unlock_account` to the admin menu — unlocks any account by resetting `FAIL_CNT = 0` and `IS_LOCKED = 'N'` with just an account number.
 
-### [2026-03-26] 신규 계좌 개설 (Sign Up) 기능 추가
-- `INSERT INTO` 구문을 활용한 신규 계정(ACCOUNT) 생성 로직 구현.
-- 데이터 무결성 유지를 위해 ORA-00001(기본키 중복) 에러 캐치 및 예외 처리 적용.
-### 거래 내역 원장(HISTORY) 기능 구현
-- `HISTORY` 테이블 신설 및 오라클 `IDENTITY`를 활용한 자동 순번(SEQ) 매핑.
-- 입금, 출금, 이체 발생 시 자동으로 거래 내역이 기록되도록 트랜잭션 무결성 강화.
-- `ORDER BY SEQ DESC` 커서를 활용한 최신 거래 내역 조회 기능 추가.
-### 계좌 해지 (Account Closure) 기능 구현
-- `DELETE` 쿼리를 활용한 사용자 계좌 해지 비즈니스 로직 작성.
-- 금융권 실무 룰을 반영하여 잔액이 0원일 경우에만 해지가 가능하도록 무결성 조건 추가.
-- 해지 성공 시 자동으로 세션이 종료(로그아웃)되도록 메인 라우팅 루프 개선.
+### [2026-03-26] New Account Registration (Sign Up)
+- Implemented new account creation logic using `INSERT INTO` on the ACCOUNT table.
+- Added ORA-00001 (duplicate primary key) error catching and handling to maintain data integrity.
 
-### [2026-03-07] 역할 기반 접근 제어(RBAC) 및 기능 통합
-- ACCOUNT 테이블 ROLE 컬럼 기반 관리자/고객 세션 라우팅 구현
-- Pro*C 전역 스코프(WHENEVER NOT FOUND) 커서 버그 디버깅 및 해결
-- 기존 뱅킹 기능(입출금, 이체, 잔액 조회 등)을 권한별 구조에 완전 병합
+### Transaction History Ledger (HISTORY)
+- Created the `HISTORY` table with Oracle `IDENTITY`-based auto-incrementing sequence (SEQ).
+- Strengthened transaction integrity by automatically recording history on every deposit, withdrawal, and transfer.
+- Added a history query feature using an `ORDER BY SEQ DESC` cursor to retrieve the most recent transactions.
 
-### [2026-03-04] 보안 강화 및 비밀번호 변경 기능 추가
-- **로그인 보안**: 계좌번호 외에 PIN(비밀번호) 검증 로직을 추가하여 세션 보안 강화.
-- **비밀번호 변경**: 현재 비밀번호 확인 및 새 비밀번호 2중 입력을 통한 PIN 변경 기능(`change_password`) 구현.
+### Account Closure
+- Implemented account closure business logic using a `DELETE` query.
+- Applied a real-world banking rule: closure is only allowed when the account balance is zero.
+- Improved the main routing loop to automatically end the session (logout) upon successful closure.
 
-### [2026-03-03] 거래 내역 조회 및 안정성 강화
-- **내역 조회**: Pro*C 커서를 활용하여 최근 거래 내역 5건을 표 형태로 출력하는 기능 구현.
-- **데이터 최적화**: 오라클 전용 `VARCHAR` 타입을 적용하여 문자열 처리 안정성 확보.
+### [2026-03-07] Role-Based Access Control (RBAC) & Feature Integration
+- Implemented admin/customer session routing based on the ROLE column in the ACCOUNT table.
+- Debugged and resolved a Pro*C global-scope (`WHENEVER NOT FOUND`) cursor bug.
+- Fully merged existing banking features (deposit/withdraw, transfer, balance inquiry, etc.) into the role-based structure.
 
-### [2026-02-25] 계좌 이체 및 출력 포맷팅
-- **계좌 이체**: 출금/입금/내역 저장을 하나의 트랜잭션 단위로 처리하는 이체 로직 구축.
-- **포맷 변환**: 금액 출력 시 천 단위 콤마(,)를 적용하는 `format_comma` 함수 도입.
+### [2026-03-04] Security Enhancements & Password Change
+- **Login Security**: Added PIN (password) verification in addition to account number, strengthening session security.
+- **Password Change**: Implemented `change_password` — verifies the current password and requires double entry of the new PIN.
 
-### [2026-02-23] 세션 관리 및 거래 내역 연동
-- **동적 로그인**: 입력받은 계좌번호를 DB에서 실시간 검증하는 로그인 시스템 구현.
-- **거래 추적**: `TRANSACTION_HISTORY` 테이블을 연동하여 모든 입출금 내역 자동 기록.
+### [2026-03-03] Transaction History & Stability Improvements
+- **History Inquiry**: Implemented a feature to display the 5 most recent transactions in table format using a Pro*C cursor.
+- **Data Optimization**: Applied Oracle's native `VARCHAR` type for improved string handling stability.
 
-### [2026-02-14 ~ 02-19] ATM 코어 로직 구축
-- **무한 루프 시스템**: `switch-case`를 활용한 ATM 메인 메뉴 반복 실행 환경 구축.
-- **기본 트랜잭션**: 입금 및 출금(조회 후 업데이트) 필수 금융 로직 구현.
+### [2026-02-25] Account Transfer & Output Formatting
+- **Transfer**: Built transfer logic that handles withdrawal, deposit, and history recording as a single atomic transaction.
+- **Formatting**: Introduced the `format_comma` function to display amounts with thousand-separator commas.
 
-### [2026-02-12 ~ 02-13] 인프라 및 환경 설정
-- **DB 서버**: Docker 기반 Oracle 21c XE 컨테이너 설치 및 테이블 설계.
-- **빌드 파이프라인**: Pro*C 프리컴파일부터 GCC 빌드까지의 원라인 커맨드 최적화.
+### [2026-02-23] Session Management & Transaction Tracking
+- **Dynamic Login**: Implemented a login system that validates the entered account number against the DB in real time.
+- **Transaction Tracking**: Integrated the `TRANSACTION_HISTORY` table to automatically record all deposit and withdrawal activity.
+
+### [2026-02-14 ~ 02-19] ATM Core Logic
+- **Infinite Loop System**: Built an ATM main menu loop environment using `switch-case`.
+- **Basic Transactions**: Implemented essential financial logic for deposits and withdrawals (select then update).
+
+### [2026-02-12 ~ 02-13] Infrastructure & Environment Setup
+- **DB Server**: Installed Docker-based Oracle 21c XE container and designed the table schema.
+- **Build Pipeline**: Optimized the end-to-end build command from Pro*C precompilation through GCC compilation.
