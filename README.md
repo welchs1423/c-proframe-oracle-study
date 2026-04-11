@@ -17,7 +17,9 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 
 ## 📅 Feature History
 
-### [2026-04-12] Fixed-Term Savings Deposit & Admin Bulk Interest Payment System
+### [2026-04-12] Fixed-Term Savings, Overdraft, VIP Grade & Transfer Fee
+
+#### Fixed-Term Savings Deposit & Admin Bulk Interest Payment
 - Added `SAVINGS_BALANCE` column (`NUMBER`, default `0`, `NOT NULL`) to the ACCOUNT table via `ALTER TABLE`.
 - Added customer menu option **"8. 정기 예금 가입"** (`deposit_savings` function): transfers a user-specified amount from `BALANCE` to `SAVINGS_BALANCE`; records a `'예금입금'` entry in HISTORY.
 - Balance view (`check_balance`) now displays `SAVINGS_BALANCE` alongside the regular balance.
@@ -25,7 +27,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - Key Pro*C fix: `trim_string(a_acc_no, 20)` must be called **before** using `a_acc_no` in `WHERE` clauses inside a cursor loop; `CHAR(20)` values fetched into a `char[20]` buffer retain trailing spaces that break Oracle VARCHAR2 equality comparisons if not trimmed first.
 - Cursor scope safety maintained: `EXEC SQL WHENEVER NOT FOUND CONTINUE` restored immediately after `CLOSE interest_cursor`.
 
-### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic & Overdraft (Minus Account) Feature
+#### Overdraft (Minus Account) Feature
 - Added `CREDIT_LIMIT` column (`NUMBER`, default `0`) to the ACCOUNT table via `ALTER TABLE`.
 - On login, `CREDIT_LIMIT` is fetched and stored in a global host variable (`credit_limit`).
 - Withdrawal/transfer balance check updated: blocks only when `(current_balance + credit_limit) < requested_amount`, allowing the actual `BALANCE` to go negative within the limit.
@@ -34,7 +36,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - Account closure (`delete_account`) now blocks if balance is non-zero in either direction (positive or negative).
 - Added admin menu option **"5. 마이너스 한도 부여"** (`grant_credit` function): accepts an account number and a limit amount, then updates `CREDIT_LIMIT` via `UPDATE`.
 
-### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic
+#### Customer Grade System (VIP/NORMAL) & Transfer Fee Logic
 - Added `GRADE` column (`VARCHAR2(10)`, default `'NORMAL'`) to the ACCOUNT table via `ALTER TABLE`.
 - On login, `GRADE` is fetched from DB and stored in a global host variable; displayed in the welcome message and balance view.
 - Transfer fee rules by grade:
