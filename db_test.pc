@@ -12,6 +12,7 @@ EXEC SQL BEGIN DECLARE SECTION;
     VARCHAR user_name[40];
     long current_balance;
     long credit_limit;     /* 마이너스 통장 한도 */
+    long savings_balance;  /* 정기 예금 잔액 */
 
     char db_pw[15];
     char n_pw[15];
@@ -295,6 +296,62 @@ void grant_credit() {
     printf("[성공] 계좌(%s)의 마이너스 한도가 %s원으로 설정되었습니다.\n", a_acc_no, limit_str);
 }
 
+void pay_interest() {
+    int count = 0;
+    long interest;
+    char interest_str[50];
+
+    printf("\n--- [일괄 이자 지급] ---\n");
+    printf("모든 계좌의 예금 잔액에 연 5%% 이자를 지급합니다.\n");
+    printf("--------------------------------------------------\n");
+
+    EXEC SQL DECLARE interest_cursor CURSOR FOR
+        SELECT ACC_NO, SAVINGS_BALANCE FROM ACCOUNT
+        WHERE SAVINGS_BALANCE > 0 ORDER BY ACC_NO;
+
+    EXEC SQL OPEN interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH interest_cursor INTO :a_acc_no, :savings_balance;
+
+        /* CHAR(20) trailing space 제거 — WHERE절 사용 전에 반드시 trim */
+        trim_string(a_acc_no, 20);
+
+        /* 이자 계산: 연 5% */
+        interest = savings_balance * 5 / 100;
+        if (interest == 0) continue;
+
+        /* 이자를 일반 잔액(BALANCE)에 입금 */
+        amount = interest;
+        EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :amount WHERE ACC_NO = :a_acc_no;
+
+        /* 이자 지급 후 잔액 조회 (HISTORY 기록용) */
+        EXEC SQL SELECT BALANCE INTO :a_balance FROM ACCOUNT WHERE ACC_NO = :a_acc_no;
+
+        /* HISTORY 기록 */
+        strcpy(h_acc_no, a_acc_no);
+        strcpy(h_trans_type, "이자지급");
+        h_amount = interest;
+        h_balance_after = a_balance;
+
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
+
+        trim_string(a_acc_no, 20);
+        format_comma(interest, interest_str);
+        printf("  계좌 %-15s : 이자 %s원 지급\n", a_acc_no, interest_str);
+        count++;
+    }
+
+    EXEC SQL CLOSE interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    EXEC SQL COMMIT;
+    printf("--------------------------------------------------\n");
+    printf("[완료] 총 %d개 계좌에 이자가 지급되었습니다.\n", count);
+}
+
 /* --- [고객 뱅킹 기능] --- */
 void view_history() {
     int count = 0;
@@ -327,13 +384,16 @@ void view_history() {
 }
 
 void check_balance() {
-    char bal_str[50], limit_str[50];
-    EXEC SQL SELECT BALANCE, CREDIT_LIMIT INTO :current_balance, :credit_limit
+    char bal_str[50], limit_str[50], savings_str[50];
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT, SAVINGS_BALANCE
+             INTO :current_balance, :credit_limit, :savings_balance
              FROM ACCOUNT WHERE ACC_NO = :acc_no;
     format_comma(current_balance, bal_str);
-    format_comma(credit_limit, limit_str);
+    format_comma(savings_balance, savings_str);
     printf("\n현재 잔액: %s원 (등급: %s)\n", bal_str, db_grade);
+    printf("예금 잔액: %s원\n", savings_str);
     if (credit_limit > 0) {
+        format_comma(credit_limit, limit_str);
         printf("마이너스 통장 한도: %s원 | 사용 가능 금액: ", limit_str);
         char avail_str[50];
         format_comma(current_balance + credit_limit, avail_str);
@@ -475,6 +535,54 @@ void transfer() {
     }
 }
 
+void deposit_savings() {
+    char bal_str[50], savings_str[50];
+
+    printf("\n--- [정기 예금 가입] ---\n");
+
+    EXEC SQL SELECT BALANCE, SAVINGS_BALANCE INTO :current_balance, :savings_balance
+             FROM ACCOUNT WHERE ACC_NO = :acc_no;
+
+    format_comma(current_balance, bal_str);
+    format_comma(savings_balance, savings_str);
+    printf("현재 일반 잔액: %s원 | 현재 예금 잔액: %s원\n", bal_str, savings_str);
+
+    printf("예금에 넣을 금액: ");
+    scanf("%ld", &amount);
+
+    if (amount <= 0) {
+        printf("[실패] 0원 이하는 입금할 수 없습니다.\n");
+        return;
+    }
+
+    if (current_balance < amount) {
+        format_comma(current_balance, bal_str);
+        printf("[실패] 일반 잔액이 부족합니다. (현재 잔액: %s원)\n", bal_str);
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT
+             SET BALANCE = BALANCE - :amount,
+                 SAVINGS_BALANCE = SAVINGS_BALANCE + :amount
+             WHERE ACC_NO = :acc_no;
+
+    EXEC SQL SELECT BALANCE INTO :current_balance FROM ACCOUNT WHERE ACC_NO = :acc_no;
+
+    strcpy(h_acc_no, acc_no);
+    strcpy(h_trans_type, "예금입금");
+    h_amount = amount;
+    h_balance_after = current_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_acc_no, :h_trans_type, :h_amount, :h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    format_comma(amount, bal_str);
+    format_comma(savings_balance + amount, savings_str);
+    printf("[성공] %s원이 정기 예금에 입금되었습니다. (누적 예금 잔액: %s원)\n", bal_str, savings_str);
+}
+
 void change_password() {
     char cur_pw[15], c_pw[15];
     printf("\n현재 PW: ");
@@ -581,6 +689,7 @@ int main() {
                 printf("3. 잠긴 계좌 해제\n");
                 printf("4. VIP 등급 부여\n");
                 printf("5. 마이너스 한도 부여\n");
+                printf("6. 일괄 이자 지급 (연 5%%)\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -589,6 +698,7 @@ int main() {
                 else if (choice == 3) unlock_account();
                 else if (choice == 4) grant_vip();
                 else if (choice == 5) grant_credit();
+                else if (choice == 6) pay_interest();
             }
         }
         else if (login_status == 1) {
@@ -601,7 +711,8 @@ int main() {
                 printf("5. 계좌 이체\n");
                 printf("6. 비밀번호 변경\n");
                 printf("7. 계좌 해지\n");
-                printf("8. 로그아웃\n");
+                printf("8. 정기 예금 가입\n");
+                printf("9. 로그아웃\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -614,7 +725,8 @@ int main() {
                 else if (choice == 7) {
                     if (delete_account() == 1) break;
                 }
-                else if (choice == 8) break;
+                else if (choice == 8) deposit_savings();
+                else if (choice == 9) break;
             }
         }
     }

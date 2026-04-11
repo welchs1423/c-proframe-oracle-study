@@ -17,6 +17,14 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 
 ## 📅 Feature History
 
+### [2026-04-12] Fixed-Term Savings Deposit & Admin Bulk Interest Payment System
+- Added `SAVINGS_BALANCE` column (`NUMBER`, default `0`, `NOT NULL`) to the ACCOUNT table via `ALTER TABLE`.
+- Added customer menu option **"8. 정기 예금 가입"** (`deposit_savings` function): transfers a user-specified amount from `BALANCE` to `SAVINGS_BALANCE`; records a `'예금입금'` entry in HISTORY.
+- Balance view (`check_balance`) now displays `SAVINGS_BALANCE` alongside the regular balance.
+- Added admin menu option **"6. 일괄 이자 지급 (연 5%)"** (`pay_interest` function): iterates all accounts with `SAVINGS_BALANCE > 0` via an Oracle cursor, applies a 5% annual rate, credits the interest to each account's `BALANCE`, and records a `'이자지급'` entry in HISTORY per account.
+- Key Pro*C fix: `trim_string(a_acc_no, 20)` must be called **before** using `a_acc_no` in `WHERE` clauses inside a cursor loop; `CHAR(20)` values fetched into a `char[20]` buffer retain trailing spaces that break Oracle VARCHAR2 equality comparisons if not trimmed first.
+- Cursor scope safety maintained: `EXEC SQL WHENEVER NOT FOUND CONTINUE` restored immediately after `CLOSE interest_cursor`.
+
 ### [2026-04-12] Customer Grade System (VIP/NORMAL) & Transfer Fee Logic & Overdraft (Minus Account) Feature
 - Added `CREDIT_LIMIT` column (`NUMBER`, default `0`) to the ACCOUNT table via `ALTER TABLE`.
 - On login, `CREDIT_LIMIT` is fetched and stored in a global host variable (`credit_limit`).
