@@ -68,4 +68,26 @@ typedef struct {
     int  role;   /* 1 = 고객, 2 = 관리자 */
 } ClientSession;
 
+/* =========================================
+   패킷 XOR 암호화 / 복호화
+   키: "CSTK#ATM" (8 바이트) — 사이클릭 적용
+   XOR 연산은 대칭적이므로 암호화 = 복호화
+   ========================================= */
+#define CSTOCK_XOR_KEY_LEN 8
+static const unsigned char CSTOCK_XOR_KEY[CSTOCK_XOR_KEY_LEN] = {
+    0x43, 0x53, 0x54, 0x4B, 0x23, 0x41, 0x54, 0x4D  /* "CSTK#ATM" */
+};
+
+static inline void encrypt_packet(Packet *p) {
+    unsigned char *raw = (unsigned char *)p;
+    int i;
+    for (i = 0; i < (int)sizeof(Packet); i++)
+        raw[i] ^= CSTOCK_XOR_KEY[i % CSTOCK_XOR_KEY_LEN];
+}
+
+/* XOR 암호화는 자기 역원 — 복호화 = 암호화 재적용 */
+static inline void decrypt_packet(Packet *p) {
+    encrypt_packet(p);
+}
+
 #endif /* PROTOCOL_H */

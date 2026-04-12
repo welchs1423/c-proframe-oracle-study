@@ -19,6 +19,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 
 ### [2026-04-13] TCP/IP Client-Server Architecture
 - [TCP/IP 클라이언트-서버 아키텍처 완전 분리 및 소켓 통신 통합]
+- [Phase 3] fork() 기반 멀티 클라이언트 동시 접속 및 패킷 암호화 적용
 
 Converted the application from a single-process monolith into two independent programs communicating over TCP sockets.
 

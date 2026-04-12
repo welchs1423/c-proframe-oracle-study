@@ -61,7 +61,9 @@ EXEC SQL END DECLARE SECTION;
    내부 유틸리티
    ──────────────────────────────────────── */
 static void send_pkt(int fd, Packet *p) {
-    send(fd, p, sizeof(Packet), 0);
+    Packet enc = *p;
+    encrypt_packet(&enc);
+    send(fd, &enc, sizeof(Packet), 0);
 }
 
 static void ok_msg(int fd, int type, const char *msg) {

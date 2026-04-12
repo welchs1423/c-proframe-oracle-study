@@ -43,14 +43,18 @@ static void fmt_comma(long amt, char *out) {
     }
 }
 
-/* 서버에 패킷 송신 */
+/* 서버에 패킷 송신 (XOR 암호화 후 전송) */
 static int send_pkt(Packet *p) {
-    return send(server_fd, p, sizeof(Packet), 0);
+    Packet enc = *p;
+    encrypt_packet(&enc);
+    return send(server_fd, &enc, sizeof(Packet), 0);
 }
 
-/* 서버로부터 패킷 수신 */
+/* 서버로부터 패킷 수신 (수신 후 XOR 복호화) */
 static int recv_pkt(Packet *p) {
-    return recv(server_fd, p, sizeof(Packet), MSG_WAITALL);
+    int n = recv(server_fd, p, sizeof(Packet), MSG_WAITALL);
+    if (n > 0) decrypt_packet(p);
+    return n;
 }
 
 /* 단순 요청 → 단일 응답 수신 후 메시지 출력 */
