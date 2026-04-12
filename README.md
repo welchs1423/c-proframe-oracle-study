@@ -45,6 +45,12 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - Added admin menu option **"4. VIP 등급 부여"** (`grant_vip` function): accepts an account number and updates its GRADE to `'VIP'`.
 - Admin account list now shows the GRADE column for all accounts.
 
+#### Admin System Statistics Dashboard
+- Added admin menu option **"7. 시스템 통계 대시보드"** (`system_stats_dashboard` function): queries the DB with aggregate functions (`COUNT`, `SUM`, `NVL`, `ABS`) and displays a formatted ASCII table.
+- Dashboard metrics: total account count, total bank deposits (`BALANCE + SAVINGS_BALANCE`), total overdraft loan amount (absolute value of negative `BALANCE` sum), and VIP customer count.
+- SQL safety: all `SUM()` expressions wrapped in `NVL(..., 0)` to prevent NULL host variable binding errors on empty result sets.
+- Pro*C scope safety: `EXEC SQL WHENEVER NOT FOUND CONTINUE` set at the start of the function to prevent cursor-scope leakage from other functions.
+
 ### Account Lock on Password Failures & Admin Unlock
 - Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.
 - On login, `IS_LOCKED = 'Y'` is checked before prompting for a password, blocking access to locked accounts.

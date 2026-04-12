@@ -352,6 +352,53 @@ void pay_interest() {
     printf("[완료] 총 %d개 계좌에 이자가 지급되었습니다.\n", count);
 }
 
+void system_stats_dashboard() {
+    EXEC SQL BEGIN DECLARE SECTION;
+        long stat_accounts;
+        long stat_total_bal;
+        long stat_overdraft;
+        long stat_vip;
+    EXEC SQL END DECLARE SECTION;
+
+    char s_accounts[30], s_total_bal[50], s_overdraft[50], s_vip[30];
+
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    /* 1) 총 가입 고객 수 */
+    EXEC SQL SELECT COUNT(*) INTO :stat_accounts FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) stat_accounts = 0;
+
+    /* 2) 은행 총 예치금 (일반 잔액 + 정기 예금 잔액 합산) */
+    EXEC SQL SELECT NVL(SUM(BALANCE), 0) + NVL(SUM(SAVINGS_BALANCE), 0)
+             INTO :stat_total_bal FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) stat_total_bal = 0;
+
+    /* 3) 마이너스 통장 대출 총액 (음수 잔액의 절대값 합산) */
+    EXEC SQL SELECT NVL(ABS(SUM(BALANCE)), 0) INTO :stat_overdraft
+             FROM ACCOUNT WHERE BALANCE < 0;
+    if (sqlca.sqlcode != 0) stat_overdraft = 0;
+
+    /* 4) VIP 등급 고객 수 */
+    EXEC SQL SELECT COUNT(*) INTO :stat_vip FROM ACCOUNT WHERE GRADE = 'VIP';
+    if (sqlca.sqlcode != 0) stat_vip = 0;
+
+    format_comma(stat_accounts, s_accounts);
+    format_comma(stat_total_bal, s_total_bal);
+    format_comma(stat_overdraft, s_overdraft);
+    format_comma(stat_vip, s_vip);
+
+    printf("\n==================================================\n");
+    printf("          [관리자] 시스템 통계 대시보드\n");
+    printf("==================================================\n");
+    printf("  항목                       수치\n");
+    printf("--------------------------------------------------\n");
+    printf("  총 가입 고객 수        : %15s 명\n", s_accounts);
+    printf("  은행 총 예치금         : %15s 원\n", s_total_bal);
+    printf("  마이너스 대출 총액     : %15s 원\n", s_overdraft);
+    printf("  VIP 등급 고객 수       : %15s 명\n", s_vip);
+    printf("==================================================\n");
+}
+
 /* --- [고객 뱅킹 기능] --- */
 void view_history() {
     int count = 0;
@@ -690,6 +737,7 @@ int main() {
                 printf("4. VIP 등급 부여\n");
                 printf("5. 마이너스 한도 부여\n");
                 printf("6. 일괄 이자 지급 (연 5%%)\n");
+                printf("7. 시스템 통계 대시보드\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -699,6 +747,7 @@ int main() {
                 else if (choice == 4) grant_vip();
                 else if (choice == 5) grant_credit();
                 else if (choice == 6) pay_interest();
+                else if (choice == 7) system_stats_dashboard();
             }
         }
         else if (login_status == 1) {
