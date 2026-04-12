@@ -1,11 +1,17 @@
 # 실행 파일
 db_test
+cstock_atm
 
-# 프리컴파일된 C 파일
+# 프리컴파일된 C 파일 (Pro*C 빌드 산출물)
 db_test.c
+src/db_util.c
+src/auth.c
+src/banking.c
+src/admin.c
 
-# 기타 임시 파일
+# 오브젝트 및 빌드 임시 파일
 *.o
+obj/
 
 # Claude Code 프로젝트 가이드
 CLAUDE.md

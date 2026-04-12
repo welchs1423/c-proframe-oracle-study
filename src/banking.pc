@@ -1,0 +1,347 @@
+#include "cstock.h"
+#define SQLCA_STORAGE_CLASS extern
+#include <sqlca.h>
+
+/* =========================================
+   [banking.pc] 잔액 조회, 입출금, 이체, 거래 내역, 정기 예금
+   ========================================= */
+
+EXEC SQL BEGIN DECLARE SECTION;
+    char    b_acc_no[20];
+    long    b_current_balance;
+    long    b_credit_limit;
+    long    b_savings_balance;
+    long    b_amount;
+    long    b_total_deduct;     /* 이체 시 금액 + 수수료 합계 */
+    char    b_target_acc[20];
+    VARCHAR b_target_name[40];
+    long    b_target_bal;
+    char    b_h_acc_no[20];
+    char    b_h_trans_type[20];
+    long    b_h_amount;
+    long    b_h_balance_after;
+    char    b_h_trans_date[30];
+EXEC SQL END DECLARE SECTION;
+
+/* ─── 잔액 조회 ─── */
+void check_balance(SessionState *sess) {
+    char bal_str[50], limit_str[50], savings_str[50], avail_str[50];
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT, SAVINGS_BALANCE
+             INTO :b_current_balance, :b_credit_limit, :b_savings_balance
+             FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    format_comma(b_current_balance, bal_str);
+    format_comma(b_savings_balance, savings_str);
+    printf("\n현재 잔액: %s원 (등급: %s)\n", bal_str, sess->db_grade);
+    printf("예금 잔액: %s원\n", savings_str);
+
+    if (b_credit_limit > 0) {
+        format_comma(b_credit_limit, limit_str);
+        format_comma(b_current_balance + b_credit_limit, avail_str);
+        printf("마이너스 통장 한도: %s원 | 사용 가능 금액: %s원\n",
+               limit_str, avail_str);
+    }
+}
+
+/* ─── 입금 ─── */
+void deposit(SessionState *sess) {
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    printf("\n입금할 금액: ");
+    scanf("%ld", &b_amount);
+
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :b_amount WHERE ACC_NO = :b_acc_no;
+    EXEC SQL SELECT BALANCE INTO :b_current_balance FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    strcpy(b_h_acc_no, b_acc_no);
+    strcpy(b_h_trans_type, "입금");
+    b_h_amount       = b_amount;
+    b_h_balance_after = b_current_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+
+    EXEC SQL COMMIT;
+    printf("[%ld원] 입금 완료.\n", b_amount);
+}
+
+/* ─── 출금 ─── */
+void withdraw(SessionState *sess) {
+    char avail_str[50], bal_str[50];
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    printf("\n출금할 금액: ");
+    scanf("%ld", &b_amount);
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT
+             INTO :b_current_balance, :b_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    /* 마이너스 통장 한도 포함 잔액 부족 검사 */
+    if ((b_current_balance + b_credit_limit) < b_amount) {
+        format_comma(b_current_balance + b_credit_limit, avail_str);
+        printf("[실패] 한도 초과. 출금 가능 금액: %s원\n", avail_str);
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :b_amount WHERE ACC_NO = :b_acc_no;
+    b_current_balance -= b_amount;
+
+    strcpy(b_h_acc_no, b_acc_no);
+    strcpy(b_h_trans_type, "출금");
+    b_h_amount        = b_amount;
+    b_h_balance_after = b_current_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+
+    EXEC SQL COMMIT;
+    format_comma(b_current_balance, bal_str);
+    printf("[%ld원] 출금 완료. 현재 잔액: %s원\n", b_amount, bal_str);
+}
+
+/* ─── 계좌 이체 ─── */
+void transfer(SessionState *sess) {
+    long fee = 0;
+    char fee_str[50], avail_str[50];
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    printf("\n대상 계좌번호: ");
+    scanf("%s", b_target_acc);
+
+    EXEC SQL SELECT USER_NAME INTO :b_target_name
+             FROM ACCOUNT WHERE ACC_NO = :b_target_acc;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    /* NORMAL 등급인 경우 수수료 500원 부과 */
+    if (strcmp(sess->db_grade, "NORMAL") == 0) {
+        fee = 500;
+    }
+
+    printf("이체할 금액: ");
+    scanf("%ld", &b_amount);
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT
+             INTO :b_current_balance, :b_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    /* 마이너스 통장 한도 포함 잔액 부족 검사 */
+    if ((b_current_balance + b_credit_limit) < b_amount + fee) {
+        format_comma(b_current_balance + b_credit_limit, avail_str);
+        if (fee > 0) {
+            printf("[실패] 한도 초과 (수수료 500원 포함). 이체 가능 금액: %s원, 요청: %ld원\n",
+                   avail_str, b_amount + fee);
+        } else {
+            printf("[실패] 한도 초과. 이체 가능 금액: %s원\n", avail_str);
+        }
+        return;
+    }
+
+    /* 이체 금액 + 수수료 차감 */
+    b_total_deduct = b_amount + fee;
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :b_total_deduct WHERE ACC_NO = :b_acc_no;
+    b_current_balance -= b_total_deduct;
+
+    /* 이체출금 내역 저장 */
+    strcpy(b_h_acc_no, b_acc_no);
+    strcpy(b_h_trans_type, "이체출금");
+    b_h_amount        = b_amount;
+    b_h_balance_after = b_current_balance;
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+
+    /* NORMAL 등급: 수수료 내역 별도 저장 */
+    if (fee > 0) {
+        strcpy(b_h_acc_no, b_acc_no);
+        strcpy(b_h_trans_type, "수수료");
+        b_h_amount        = fee;
+        b_h_balance_after = b_current_balance;
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+    }
+
+    /* 수신 계좌에 이체 금액 입금 */
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :b_amount WHERE ACC_NO = :b_target_acc;
+    EXEC SQL SELECT BALANCE INTO :b_target_bal FROM ACCOUNT WHERE ACC_NO = :b_target_acc;
+
+    strcpy(b_h_acc_no, b_target_acc);
+    strcpy(b_h_trans_type, "이체입금");
+    b_h_amount        = b_amount;
+    b_h_balance_after = b_target_bal;
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    b_target_name.arr[b_target_name.len] = '\0';
+    if (fee > 0) {
+        format_comma(fee, fee_str);
+        printf("[%s]님에게 %ld원 이체 완료. (수수료 %s원 차감)\n",
+               b_target_name.arr, b_amount, fee_str);
+    } else {
+        printf("[%s]님에게 %ld원 이체 완료. (VIP — 수수료 없음)\n",
+               b_target_name.arr, b_amount);
+    }
+}
+
+/* ─── 거래 내역 조회 (5건 페이징) ─── */
+void view_history(SessionState *sess) {
+    int total_count = 0, page_count = 0, user_quit = 0;
+    char bal_str[50], amt_str[50];
+    char ans;
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    printf("\n--- [거래 내역 조회] ---\n");
+
+    EXEC SQL DECLARE hist_cursor CURSOR FOR
+        SELECT TRANS_TYPE, AMOUNT, BALANCE_AFTER,
+               TO_CHAR(TRANS_DATE, 'YYYY-MM-DD HH24:MI:SS')
+        FROM HISTORY WHERE ACC_NO = :b_acc_no ORDER BY SEQ DESC;
+
+    EXEC SQL OPEN hist_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH hist_cursor
+                 INTO :b_h_trans_type, :b_h_amount, :b_h_balance_after, :b_h_trans_date;
+
+        trim_string(b_h_trans_type, 20);
+        trim_string(b_h_trans_date, 30);
+
+        format_comma(b_h_amount, amt_str);
+        format_comma(b_h_balance_after, bal_str);
+
+        printf("[%s] %-10s | 금액: %10s원 | 잔액: %10s원\n",
+               b_h_trans_date, b_h_trans_type, amt_str, bal_str);
+        total_count++;
+        page_count++;
+
+        /* 5건 출력 후 페이징 프롬프트 */
+        if (page_count == 5) {
+            printf("\n다음 페이지를 보시겠습니까? (Y/N): ");
+            scanf(" %c", &ans);
+            if (ans != 'Y' && ans != 'y') {
+                user_quit = 1;
+                break;
+            }
+            page_count = 0;
+        }
+    }
+
+    EXEC SQL CLOSE hist_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    if (total_count == 0) {
+        printf("거래 내역이 존재하지 않습니다.\n");
+    } else if (!user_quit) {
+        printf("더 이상 내역이 없습니다.\n");
+    }
+}
+
+/* ─── 거래 내역 CSV 다운로드 ─── */
+void download_history_csv(SessionState *sess) {
+    char filename[60], trimmed_acc[20];
+    FILE *fp;
+    int count = 0;
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    strcpy(trimmed_acc, b_acc_no);
+    trim_string(trimmed_acc, 20);
+    sprintf(filename, "history_%s.csv", trimmed_acc);
+
+    fp = fopen(filename, "w");
+    if (fp == NULL) {
+        printf("[오류] 파일을 생성할 수 없습니다.\n");
+        return;
+    }
+
+    fprintf(fp, "거래일시,거래유형,거래금액,거래후잔액\n");
+
+    EXEC SQL DECLARE csv_cursor CURSOR FOR
+        SELECT TO_CHAR(TRANS_DATE, 'YYYY-MM-DD HH24:MI:SS'),
+               TRANS_TYPE, AMOUNT, BALANCE_AFTER
+        FROM HISTORY WHERE ACC_NO = :b_acc_no ORDER BY SEQ DESC;
+
+    EXEC SQL OPEN csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH csv_cursor
+                 INTO :b_h_trans_date, :b_h_trans_type, :b_h_amount, :b_h_balance_after;
+        trim_string(b_h_trans_date, 30);
+        trim_string(b_h_trans_type, 20);
+        fprintf(fp, "%s,%s,%ld,%ld\n",
+                b_h_trans_date, b_h_trans_type, b_h_amount, b_h_balance_after);
+        count++;
+    }
+
+    EXEC SQL CLOSE csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    fclose(fp);
+    printf("거래 내역이 %s 파일로 저장되었습니다.\n", filename);
+}
+
+/* ─── 정기 예금 가입 ─── */
+void deposit_savings(SessionState *sess) {
+    char bal_str[50], savings_str[50];
+
+    strncpy(b_acc_no, sess->acc_no, 20);
+
+    printf("\n--- [정기 예금 가입] ---\n");
+
+    EXEC SQL SELECT BALANCE, SAVINGS_BALANCE
+             INTO :b_current_balance, :b_savings_balance
+             FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    format_comma(b_current_balance, bal_str);
+    format_comma(b_savings_balance, savings_str);
+    printf("현재 일반 잔액: %s원 | 현재 예금 잔액: %s원\n", bal_str, savings_str);
+
+    printf("예금에 넣을 금액: ");
+    scanf("%ld", &b_amount);
+
+    if (b_amount <= 0) {
+        printf("[실패] 0원 이하는 입금할 수 없습니다.\n");
+        return;
+    }
+
+    if (b_current_balance < b_amount) {
+        format_comma(b_current_balance, bal_str);
+        printf("[실패] 일반 잔액이 부족합니다. (현재 잔액: %s원)\n", bal_str);
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT
+             SET BALANCE         = BALANCE         - :b_amount,
+                 SAVINGS_BALANCE = SAVINGS_BALANCE + :b_amount
+             WHERE ACC_NO = :b_acc_no;
+
+    EXEC SQL SELECT BALANCE INTO :b_current_balance FROM ACCOUNT WHERE ACC_NO = :b_acc_no;
+
+    strcpy(b_h_acc_no, b_acc_no);
+    strcpy(b_h_trans_type, "예금입금");
+    b_h_amount        = b_amount;
+    b_h_balance_after = b_current_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:b_h_acc_no, :b_h_trans_type, :b_h_amount, :b_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    format_comma(b_amount, bal_str);
+    format_comma(b_savings_balance + b_amount, savings_str);
+    printf("[성공] %s원이 정기 예금에 입금되었습니다. (누적 예금 잔액: %s원)\n",
+           bal_str, savings_str);
+}

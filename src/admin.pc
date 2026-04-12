@@ -1,0 +1,243 @@
+#include "cstock.h"
+#define SQLCA_STORAGE_CLASS extern
+#include <sqlca.h>
+
+/* =========================================
+   [admin.pc] 관리자 대시보드 및 관리 기능
+   ========================================= */
+
+EXEC SQL BEGIN DECLARE SECTION;
+    char    adm_acc_no[20];
+    VARCHAR adm_user_name[40];
+    long    adm_balance;
+    char    adm_grade[11];
+    long    adm_savings_balance;
+    long    adm_amount;
+    char    adm_is_locked[2];
+    char    adm_h_acc_no[20];
+    char    adm_h_trans_type[20];
+    long    adm_h_amount;
+    long    adm_h_balance_after;
+    long    adm_a_balance;
+    /* 통계 대시보드 전용 */
+    long    stat_accounts;
+    long    stat_total_bal;
+    long    stat_overdraft;
+    long    stat_vip;
+EXEC SQL END DECLARE SECTION;
+
+/* ─── 전체 계좌 현황 조회 ─── */
+void admin_view_accounts(void) {
+    int count = 0;
+    char balance_str[50];
+
+    printf("\n==================================================\n");
+    printf("           [관리자 모드] 전체 계좌 현황\n");
+    printf("==================================================\n");
+    printf("%-15s | %-15s | %-8s | %s\n", "계좌번호", "고객명", "등급", "잔액(원)");
+    printf("--------------------------------------------------\n");
+
+    EXEC SQL DECLARE acc_cursor CURSOR FOR
+        SELECT ACC_NO, USER_NAME, BALANCE, GRADE FROM ACCOUNT ORDER BY ACC_NO;
+
+    EXEC SQL OPEN acc_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH acc_cursor
+                 INTO :adm_acc_no, :adm_user_name, :adm_balance, :adm_grade;
+
+        adm_user_name.arr[adm_user_name.len] = '\0';
+        format_comma(adm_balance, balance_str);
+        trim_string(adm_acc_no, 20);
+        trim_string(adm_grade, 11);
+
+        printf("%-15s | %-15s | %-8s | %15s\n",
+               adm_acc_no, adm_user_name.arr, adm_grade, balance_str);
+        count++;
+    }
+
+    EXEC SQL CLOSE acc_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    printf("--------------------------------------------------\n");
+    printf("총 %d개의 계좌가 조회되었습니다.\n", count);
+}
+
+/* ─── 잠긴 계좌 해제 ─── */
+void unlock_account(void) {
+    printf("\n--- [잠긴 계좌 해제] ---\n");
+    printf("해제할 계좌번호 입력: ");
+    scanf("%s", adm_acc_no);
+
+    EXEC SQL SELECT IS_LOCKED INTO :adm_is_locked
+             FROM ACCOUNT WHERE ACC_NO = :adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    trim_string(adm_is_locked, 2);
+    if (adm_is_locked[0] != 'Y') {
+        printf("[안내] 해당 계좌는 잠긴 상태가 아닙니다.\n");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = 0, IS_LOCKED = 'N' WHERE ACC_NO = :adm_acc_no;
+    EXEC SQL COMMIT;
+
+    trim_string(adm_acc_no, 20);
+    printf("[성공] 계좌(%s)의 잠금이 해제되었습니다.\n", adm_acc_no);
+}
+
+/* ─── VIP 등급 부여 ─── */
+void grant_vip(void) {
+    printf("\n--- [VIP 등급 부여] ---\n");
+    printf("VIP로 승급할 계좌번호 입력: ");
+    scanf("%s", adm_acc_no);
+
+    EXEC SQL SELECT GRADE INTO :adm_grade FROM ACCOUNT WHERE ACC_NO = :adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    trim_string(adm_grade, 11);
+    if (strcmp(adm_grade, "VIP") == 0) {
+        printf("[안내] 해당 계좌는 이미 VIP 등급입니다.\n");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET GRADE = 'VIP' WHERE ACC_NO = :adm_acc_no;
+    EXEC SQL COMMIT;
+
+    trim_string(adm_acc_no, 20);
+    printf("[성공] 계좌(%s)가 VIP 등급으로 승급되었습니다.\n", adm_acc_no);
+}
+
+/* ─── 마이너스 한도 부여 ─── */
+void grant_credit(void) {
+    long new_limit;
+    char limit_str[50];
+
+    printf("\n--- [마이너스 한도 부여] ---\n");
+    printf("한도를 부여할 계좌번호 입력: ");
+    scanf("%s", adm_acc_no);
+
+    EXEC SQL SELECT CREDIT_LIMIT INTO :adm_amount FROM ACCOUNT WHERE ACC_NO = :adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return;
+    }
+
+    format_comma(adm_amount, limit_str);
+    printf("현재 마이너스 한도: %s원\n", limit_str);
+    printf("새로 부여할 한도 금액 입력 (0 입력 시 한도 제거): ");
+    scanf("%ld", &new_limit);
+
+    if (new_limit < 0) {
+        printf("[실패] 한도는 0 이상이어야 합니다.\n");
+        return;
+    }
+
+    adm_amount = new_limit;
+    EXEC SQL UPDATE ACCOUNT SET CREDIT_LIMIT = :adm_amount WHERE ACC_NO = :adm_acc_no;
+    EXEC SQL COMMIT;
+
+    format_comma(new_limit, limit_str);
+    trim_string(adm_acc_no, 20);
+    printf("[성공] 계좌(%s)의 마이너스 한도가 %s원으로 설정되었습니다.\n",
+           adm_acc_no, limit_str);
+}
+
+/* ─── 일괄 이자 지급 (연 5%) ─── */
+void pay_interest(void) {
+    int count = 0;
+    long interest;
+    char interest_str[50];
+
+    printf("\n--- [일괄 이자 지급] ---\n");
+    printf("모든 계좌의 예금 잔액에 연 5%% 이자를 지급합니다.\n");
+    printf("--------------------------------------------------\n");
+
+    EXEC SQL DECLARE interest_cursor CURSOR FOR
+        SELECT ACC_NO, SAVINGS_BALANCE FROM ACCOUNT
+        WHERE SAVINGS_BALANCE > 0 ORDER BY ACC_NO;
+
+    EXEC SQL OPEN interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH interest_cursor INTO :adm_acc_no, :adm_savings_balance;
+
+        trim_string(adm_acc_no, 20);
+
+        interest = adm_savings_balance * 5 / 100;
+        if (interest == 0) continue;
+
+        adm_amount = interest;
+        EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :adm_amount WHERE ACC_NO = :adm_acc_no;
+
+        EXEC SQL SELECT BALANCE INTO :adm_a_balance FROM ACCOUNT WHERE ACC_NO = :adm_acc_no;
+
+        strcpy(adm_h_acc_no, adm_acc_no);
+        strcpy(adm_h_trans_type, "이자지급");
+        adm_h_amount        = interest;
+        adm_h_balance_after = adm_a_balance;
+
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:adm_h_acc_no, :adm_h_trans_type, :adm_h_amount, :adm_h_balance_after);
+
+        trim_string(adm_acc_no, 20);
+        format_comma(interest, interest_str);
+        printf("  계좌 %-15s : 이자 %s원 지급\n", adm_acc_no, interest_str);
+        count++;
+    }
+
+    EXEC SQL CLOSE interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    EXEC SQL COMMIT;
+    printf("--------------------------------------------------\n");
+    printf("[완료] 총 %d개 계좌에 이자가 지급되었습니다.\n", count);
+}
+
+/* ─── 시스템 통계 대시보드 ─── */
+void system_stats_dashboard(void) {
+    char s_accounts[30], s_total_bal[50], s_overdraft[50], s_vip[30];
+
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    EXEC SQL SELECT COUNT(*) INTO :stat_accounts FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) stat_accounts = 0;
+
+    EXEC SQL SELECT NVL(SUM(BALANCE), 0) + NVL(SUM(SAVINGS_BALANCE), 0)
+             INTO :stat_total_bal FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) stat_total_bal = 0;
+
+    EXEC SQL SELECT NVL(ABS(SUM(BALANCE)), 0) INTO :stat_overdraft
+             FROM ACCOUNT WHERE BALANCE < 0;
+    if (sqlca.sqlcode != 0) stat_overdraft = 0;
+
+    EXEC SQL SELECT COUNT(*) INTO :stat_vip FROM ACCOUNT WHERE GRADE = 'VIP';
+    if (sqlca.sqlcode != 0) stat_vip = 0;
+
+    format_comma(stat_accounts, s_accounts);
+    format_comma(stat_total_bal, s_total_bal);
+    format_comma(stat_overdraft, s_overdraft);
+    format_comma(stat_vip, s_vip);
+
+    printf("\n==================================================\n");
+    printf("          [관리자] 시스템 통계 대시보드\n");
+    printf("==================================================\n");
+    printf("  항목                       수치\n");
+    printf("--------------------------------------------------\n");
+    printf("  총 가입 고객 수        : %15s 명\n", s_accounts);
+    printf("  은행 총 예치금         : %15s 원\n", s_total_bal);
+    printf("  마이너스 대출 총액     : %15s 원\n", s_overdraft);
+    printf("  VIP 등급 고객 수       : %15s 명\n", s_vip);
+    printf("==================================================\n");
+}

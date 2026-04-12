@@ -1,0 +1,189 @@
+#include "cstock.h"
+#define SQLCA_STORAGE_CLASS extern
+#include <sqlca.h>
+
+/* =========================================
+   [auth.pc] 계좌 개설, 로그인, 비밀번호 변경, 계좌 해지
+   ========================================= */
+
+EXEC SQL BEGIN DECLARE SECTION;
+    char    s_acc_no[20];
+    VARCHAR s_user_name[40];
+    char    s_db_pw[15];
+    char    s_n_pw[15];
+    char    s_db_p[15];
+    char    s_db_role[2];
+    char    s_db_grade[11];
+    long    s_credit_limit;
+    char    s_is_locked[2];
+    int     s_fail_cnt;
+    long    s_balance;
+EXEC SQL END DECLARE SECTION;
+
+/* ─── 신규 계좌 개설 ─── */
+void create_account(void) {
+    printf("\n--- [신규 계좌 개설] ---\n");
+    printf("희망 계좌번호 입력 (예: 110-111-222): ");
+    scanf("%s", s_acc_no);
+
+    printf("고객명 입력: ");
+    scanf("%s", s_user_name.arr);
+    s_user_name.len = strlen((char *)s_user_name.arr);
+
+    printf("초기 비밀번호(4자리): ");
+    scanf("%s", s_n_pw);
+
+    EXEC SQL INSERT INTO ACCOUNT (ACC_NO, USER_NAME, BALANCE, PASSWD, ROLE)
+             VALUES (:s_acc_no, :s_user_name, 0, :s_n_pw, 'U');
+
+    if (sqlca.sqlcode == -1) {
+        printf("[실패] 이미 존재하는 계좌번호입니다.\n");
+    } else if (sqlca.sqlcode != 0) {
+        printf("[실패] 개설 중 DB 오류 (에러코드: %d)\n", sqlca.sqlcode);
+    } else {
+        EXEC SQL COMMIT;
+        printf("[성공] %s님의 신규 계좌(%s) 개설 완료!\n",
+               s_user_name.arr, s_acc_no);
+    }
+}
+
+/* ─── 로그인 → 0(실패), 1(고객), 2(관리자) ─── */
+int login(SessionState *sess) {
+    char input_pw[15];
+
+    printf("\n계좌번호 입력: ");
+    scanf("%s", s_acc_no);
+
+    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT, GRADE, CREDIT_LIMIT
+             INTO :s_user_name, :s_db_pw, :s_db_role,
+                  :s_is_locked, :s_fail_cnt, :s_db_grade, :s_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        printf("[실패] 존재하지 않는 계좌입니다.\n");
+        return 0;
+    }
+
+    /* [1] 계좌 잠금 여부 선확인 */
+    trim_string(s_is_locked, 2);
+    if (s_is_locked[0] == 'Y') {
+        printf("[잠금] 비밀번호 오류 횟수 초과로 잠긴 계좌입니다. 관리자에게 문의하세요.\n");
+        return 0;
+    }
+
+    printf("비밀번호 입력: ");
+    scanf("%s", input_pw);
+
+    trim_string(s_db_pw, 15);
+
+    /* [2] 비밀번호 불일치 처리 */
+    if (strcmp(input_pw, s_db_pw) != 0) {
+        EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = FAIL_CNT + 1 WHERE ACC_NO = :s_acc_no;
+        EXEC SQL SELECT FAIL_CNT INTO :s_fail_cnt FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+
+        if (s_fail_cnt >= 3) {
+            EXEC SQL UPDATE ACCOUNT SET IS_LOCKED = 'Y' WHERE ACC_NO = :s_acc_no;
+            EXEC SQL COMMIT;
+            printf("[잠금] 비밀번호를 %d회 틀렸습니다. 계좌가 잠겼습니다. 관리자에게 문의하세요.\n",
+                   s_fail_cnt);
+        } else {
+            EXEC SQL COMMIT;
+            printf("[실패] 비밀번호 불일치 (오류 횟수: %d/3)\n", s_fail_cnt);
+        }
+        return 0;
+    }
+
+    /* [3] 로그인 성공 → FAIL_CNT 초기화 */
+    EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = 0 WHERE ACC_NO = :s_acc_no;
+    EXEC SQL COMMIT;
+
+    s_user_name.arr[s_user_name.len] = '\0';
+    trim_string(s_db_grade, 11);
+    trim_string(s_acc_no, 20);
+
+    /* 세션 상태 저장 */
+    strncpy(sess->acc_no,    s_acc_no,              20); sess->acc_no[20]    = '\0';
+    strncpy(sess->user_name, (char *)s_user_name.arr, 40); sess->user_name[40] = '\0';
+    strncpy(sess->db_grade,  s_db_grade,             11); sess->db_grade[11]  = '\0';
+    sess->credit_limit = s_credit_limit;
+
+    printf("\n[환영합니다] %s님 접속 성공! (등급: %s)\n",
+           sess->user_name, sess->db_grade);
+
+    if (s_db_role[0] == 'A') return 2;
+    return 1;
+}
+
+/* ─── 비밀번호 변경 ─── */
+void change_password(SessionState *sess) {
+    char cur_pw[15], c_pw[15];
+
+    strncpy(s_acc_no, sess->acc_no, 20);
+
+    printf("\n현재 PW: ");
+    scanf("%s", cur_pw);
+
+    EXEC SQL SELECT PASSWD INTO :s_db_p FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+    trim_string(s_db_p, 15);
+
+    if (strcmp(cur_pw, s_db_p) != 0) {
+        printf("[실패] 현재 비밀번호 오류\n");
+        return;
+    }
+
+    printf("새 PW(4자리): ");
+    scanf("%s", s_n_pw);
+    printf("새 PW 확인: ");
+    scanf("%s", c_pw);
+
+    if (strcmp(s_n_pw, c_pw) != 0) {
+        printf("[실패] 입력값이 일치하지 않음\n");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET PASSWD = :s_n_pw WHERE ACC_NO = :s_acc_no;
+    EXEC SQL COMMIT;
+    printf("[성공] 비밀번호가 변경되었습니다.\n");
+}
+
+/* ─── 계좌 해지 → 0(실패), 1(성공 후 로그아웃) ─── */
+int delete_account(SessionState *sess) {
+    char cur_pw[15];
+    char bal_str[50];
+
+    strncpy(s_acc_no, sess->acc_no, 20);
+
+    printf("\n--- [계좌 해지] ---\n");
+
+    EXEC SQL SELECT BALANCE INTO :s_balance FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+
+    if (s_balance != 0) {
+        format_comma(s_balance, bal_str);
+        if (s_balance > 0) {
+            printf("[실패] 잔액이 남아있습니다. 전액 출금 또는 이체 후 해지해주세요.\n(현재 잔액: %s원)\n",
+                   bal_str);
+        } else {
+            printf("[실패] 마이너스 잔액이 남아있습니다. 전액 입금 후 해지해주세요.\n(현재 잔액: %s원)\n",
+                   bal_str);
+        }
+        return 0;
+    }
+
+    printf("해지를 진행하려면 비밀번호를 다시 입력하세요: ");
+    scanf("%s", cur_pw);
+
+    EXEC SQL SELECT PASSWD INTO :s_db_p FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+    trim_string(s_db_p, 15);
+
+    if (strcmp(cur_pw, s_db_p) != 0) {
+        printf("[실패] 비밀번호가 일치하지 않습니다.\n");
+        return 0;
+    }
+
+    EXEC SQL DELETE FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
+    EXEC SQL COMMIT;
+
+    printf("[성공] 계좌(%s)가 정상적으로 해지되었습니다. 그동안 이용해 주셔서 감사합니다.\n",
+           sess->acc_no);
+    return 1;
+}
