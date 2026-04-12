@@ -430,6 +430,49 @@ void view_history() {
     if (count == 0) printf("거래 내역이 존재하지 않습니다.\n");
 }
 
+void download_history_csv() {
+    char filename[60];
+    char trimmed_acc[20];
+    FILE *fp;
+    int count = 0;
+
+    /* 계좌번호 트림 후 파일명 생성 */
+    strcpy(trimmed_acc, acc_no);
+    trim_string(trimmed_acc, 20);
+    sprintf(filename, "history_%s.csv", trimmed_acc);
+
+    fp = fopen(filename, "w");
+    if (fp == NULL) {
+        printf("[오류] 파일을 생성할 수 없습니다.\n");
+        return;
+    }
+
+    /* CSV 헤더 출력 */
+    fprintf(fp, "거래일시,거래유형,거래금액,거래후잔액\n");
+
+    EXEC SQL DECLARE csv_cursor CURSOR FOR
+        SELECT TO_CHAR(TRANS_DATE, 'YYYY-MM-DD HH24:MI:SS'), TRANS_TYPE, AMOUNT, BALANCE_AFTER
+        FROM HISTORY WHERE ACC_NO = :acc_no ORDER BY SEQ DESC;
+
+    EXEC SQL OPEN csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH csv_cursor INTO :h_trans_date, :h_trans_type, :h_amount, :h_balance_after;
+        trim_string(h_trans_date, 30);
+        trim_string(h_trans_type, 20);
+        fprintf(fp, "%s,%s,%ld,%ld\n", h_trans_date, h_trans_type, h_amount, h_balance_after);
+        count++;
+    }
+
+    EXEC SQL CLOSE csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    fclose(fp);
+
+    printf("거래 내역이 %s 파일로 저장되었습니다.\n", filename);
+}
+
 void check_balance() {
     char bal_str[50], limit_str[50], savings_str[50];
     EXEC SQL SELECT BALANCE, CREDIT_LIMIT, SAVINGS_BALANCE
@@ -761,7 +804,8 @@ int main() {
                 printf("6. 비밀번호 변경\n");
                 printf("7. 계좌 해지\n");
                 printf("8. 정기 예금 가입\n");
-                printf("9. 로그아웃\n");
+                printf("9. 거래 내역 다운로드 (CSV)\n");
+                printf("10. 로그아웃\n");
                 printf("선택: ");
                 scanf("%d", &choice);
 
@@ -775,7 +819,8 @@ int main() {
                     if (delete_account() == 1) break;
                 }
                 else if (choice == 8) deposit_savings();
-                else if (choice == 9) break;
+                else if (choice == 9) download_history_csv();
+                else if (choice == 10) break;
             }
         }
     }
