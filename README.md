@@ -51,6 +51,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - SQL safety: all `SUM()` expressions wrapped in `NVL(..., 0)` to prevent NULL host variable binding errors on empty result sets.
 - Pro*C scope safety: `EXEC SQL WHENEVER NOT FOUND CONTINUE` set at the start of the function to prevent cursor-scope leakage from other functions.
 - [고객 거래 내역 CSV 다운로드 기능 추가]
+- [거래 내역 조회 5건씩 페이징(Pagination) 기능 적용]
 
 ### Account Lock on Password Failures & Admin Unlock
 - Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.

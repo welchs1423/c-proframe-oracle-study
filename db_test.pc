@@ -401,8 +401,11 @@ void system_stats_dashboard() {
 
 /* --- [고객 뱅킹 기능] --- */
 void view_history() {
-    int count = 0;
+    int total_count = 0;
+    int page_count = 0;
     char bal_str[50], amt_str[50];
+    int user_quit = 0;
+    char ans;
 
     printf("\n--- [거래 내역 조회] ---\n");
 
@@ -421,13 +424,32 @@ void view_history() {
         format_comma(h_amount, amt_str);
         format_comma(h_balance_after, bal_str);
 
-        printf("[%s] %-10s | 금액: %10s원 | 잔액: %10s원\n", h_trans_date, h_trans_type, amt_str, bal_str);
-        count++;
+        printf("[%s] %-10s | 금액: %10s원 | 잔액: %10s원\n",
+               h_trans_date, h_trans_type, amt_str, bal_str);
+        total_count++;
+        page_count++;
+
+        /* 5건 출력 후 페이징 프롬프트 */
+        if (page_count == 5) {
+            printf("\n다음 페이지를 보시겠습니까? (Y/N): ");
+            /* ' ' 앞에 넣어 이전 scanf가 남긴 개행 문자를 건너뜀 */
+            scanf(" %c", &ans);
+            if (ans != 'Y' && ans != 'y') {
+                user_quit = 1;
+                break;
+            }
+            page_count = 0;
+        }
     }
 
     EXEC SQL CLOSE hist_cursor;
     EXEC SQL WHENEVER NOT FOUND CONTINUE;
-    if (count == 0) printf("거래 내역이 존재하지 않습니다.\n");
+
+    if (total_count == 0) {
+        printf("거래 내역이 존재하지 않습니다.\n");
+    } else if (!user_quit) {
+        printf("더 이상 내역이 없습니다.\n");
+    }
 }
 
 void download_history_csv() {
