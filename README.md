@@ -18,6 +18,7 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 ## 📅 Feature History
 
 ### [2026-04-13] TCP/IP Client-Server Architecture
+- [TCP/IP 클라이언트-서버 아키텍처 완전 분리 및 소켓 통신 통합]
 
 Converted the application from a single-process monolith into two independent programs communicating over TCP sockets.
 
