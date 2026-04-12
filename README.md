@@ -17,6 +17,44 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 
 ## 📅 Feature History
 
+### [2026-04-13] TCP/IP Client-Server Architecture
+
+Converted the application from a single-process monolith into two independent programs communicating over TCP sockets.
+
+#### Protocol Design (`include/protocol.h`)
+- Defined a fixed-size `Packet` struct exchanged between client and server:
+  - `type` — request/response kind (`PKT_LOGIN`, `PKT_DEPOSIT`, …)
+  - `acc_no[21]` — primary account number
+  - `extra[64]` / `extra2[64]` — secondary payloads (password, target account, new PIN, etc.)
+  - `amount` — numeric amount (deposit, withdrawal, credit limit, …)
+  - `data[512]` — response message or `|`-delimited serialized row data
+  - `result` — outcome code (`RES_OK`, `RES_FAIL`, `RES_LOCKED`, `RES_MORE_DATA`, `RES_END_DATA`, `RES_ADMIN`, …)
+- Defined `ClientSession` struct to hold post-login state (acc_no, user_name, db_grade, credit_limit, role) on the client side.
+- Server port: **9090** (`SERVER_PORT`).
+
+#### Server (`src/server_main.c` + `src/server_handlers.pc`)
+- `server_main.c`: creates a TCP socket, sets `SO_REUSEADDR`, binds to `INADDR_ANY:9090`, listens, and loops on `accept()`. Each accepted connection is handed to `handle_client()`, which reads `Packet` structs with `MSG_WAITALL` and dispatches to the appropriate handler. `SIGINT` triggers a graceful shutdown (closes socket, calls `disconnect_db()`).
+- `server_handlers.pc`: Pro*C translation unit containing 18 handler functions (`srv_login`, `srv_deposit`, `srv_withdraw`, `srv_transfer`, `srv_view_history`, `srv_admin_view_accounts`, `srv_pay_interest`, …). Each function reads inputs from the request `Packet`, executes Oracle SQL (reusing the same host-variable + cursor patterns from the original modules), and calls `send_pkt()` to return a response `Packet`.
+- **Multi-row streaming**: `srv_view_history`, `srv_download_csv`, and `srv_admin_view_accounts` send one `RES_MORE_DATA` packet per row followed by a single `RES_END_DATA` terminator, keeping the socket buffer consistent regardless of whether the client reads all rows.
+- `sqlca` shared with `db_util.pc` via `#define SQLCA_STORAGE_CLASS extern`.
+
+#### Client (`src/client_main.c`)
+- Pure C — no Oracle headers or libraries required; links with no `LDFLAGS`.
+- Connects to the server via `connect()` and provides the same user menus as the original monolith.
+- All Oracle calls are replaced with `send_pkt()` / `recv_pkt(MSG_WAITALL)` round-trips.
+- **Pagination safety**: after displaying 5 history rows and the user selects "N", the client continues reading all remaining `RES_MORE_DATA` packets until `RES_END_DATA` to prevent socket buffer desynchronization.
+- `ClientSession` is populated from the login response `data` field (`"user_name|grade|credit_limit"` pipe-delimited string).
+- CSV download receives streamed row packets and writes them to a local `history_<acc_no>.csv` file.
+
+#### Build System
+- `make server` → `cstock_server` (links Oracle Instant Client)
+- `make client` → `cstock_client` (no Oracle dependency)
+- `make` → `cstock_atm` (original monolith, unchanged)
+- `./build.sh server|client|all` — wraps the above with Docker container check and `make clean`.
+- `.gitignore` updated: `cstock_server`, `cstock_client`, `src/server_handlers.c` excluded.
+
+---
+
 ### [2026-04-12] Fixed-Term Savings, Overdraft, VIP Grade & Transfer Fee
 
 #### Fixed-Term Savings Deposit & Admin Bulk Interest Payment
@@ -50,10 +88,26 @@ A console-based ATM application implementing core banking logic using Oracle DB 
 - Dashboard metrics: total account count, total bank deposits (`BALANCE + SAVINGS_BALANCE`), total overdraft loan amount (absolute value of negative `BALANCE` sum), and VIP customer count.
 - SQL safety: all `SUM()` expressions wrapped in `NVL(..., 0)` to prevent NULL host variable binding errors on empty result sets.
 - Pro*C scope safety: `EXEC SQL WHENEVER NOT FOUND CONTINUE` set at the start of the function to prevent cursor-scope leakage from other functions.
-- [고객 거래 내역 CSV 다운로드 기능 추가]
-- [거래 내역 조회 5건씩 페이징(Pagination) 기능 적용]
-- [모듈화 리팩토링 및 Makefile 빌드 자동화 환경 구축]
-- [파일 로깅 시스템(Audit Log) 및 DevOps 빌드/실행 스크립트 구축]
+#### Transaction History CSV Export
+- Added customer menu option **"9. 거래 내역 다운로드 (CSV)"** (`download_history_csv` function): opens an Oracle cursor over the full HISTORY table for the account ordered by SEQ DESC, writes each row to a local CSV file named `history_<acc_no>.csv` with a Korean header row.
+- Uses a separate `csv_cursor` declaration alongside the existing `hist_cursor` to avoid cursor-scope conflicts within the same `.pc` translation unit.
+
+#### Transaction History Pagination (5 records per page)
+- The history inquiry feature (`view_history`) was updated from a simple full dump to a 5-records-per-page display.
+- After every 5 rows fetched from the cursor, the user is prompted **"다음 페이지를 보시겠습니까? (Y/N)"**; entering `N` breaks the display loop while still closing the cursor cleanly.
+- Implemented using a `page_count` counter and a `user_quit` flag to distinguish between user-initiated stop and natural end-of-data, each producing a different status message.
+
+#### Modular Refactor & Makefile Build System
+- Refactored from a single `db_test.pc` monolith into four Pro*C modules: `db_util.pc`, `auth.pc`, `banking.pc`, `admin.pc`, plus a pure-C `main.c` and `logger.c`.
+- Introduced a `Makefile` with Docker-based Pro*C precompilation: each `.pc` file is copied into the `oracle21c` container, compiled with `proc`, and the resulting `.c` is pulled back to the host for GCC compilation.
+- `sqlca` is declared once in `db_util.pc` (no `extern` there) and referenced with `#define SQLCA_STORAGE_CLASS extern` in all other `.pc` modules.
+- `include/cstock.h` acts as the single shared header: `SessionState` struct and all cross-module function prototypes.
+
+#### File-Based Audit Logging & DevOps Scripts
+- Added `include/logger.h` and `src/logger.c`: `write_log(LogLevel, message)` appends timestamped entries to `logs/system.log`, auto-creating the `logs/` directory if absent.
+- Log levels: `LOG_INFO`, `LOG_WARN`, `LOG_ERROR` — applied throughout login, transfers, locks, account management, and admin actions.
+- Added `build.sh`: checks that the `oracle21c` Docker container is running, calls `make clean` then `make`, and prints a status summary.
+- Added `run.sh`: sets `LD_LIBRARY_PATH` for the Oracle Instant Client and launches the binary.
 
 ### Account Lock on Password Failures & Admin Unlock
 - Added `FAIL_CNT` (failure count) and `IS_LOCKED` (lock flag) columns to the ACCOUNT table for persistent lock state management in the DB.
