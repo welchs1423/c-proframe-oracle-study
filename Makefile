@@ -31,8 +31,8 @@ PC_SRCS  := $(SRC_DIR)/db_util.pc \
 # Pro*C 프리컴파일로 생성될 .c 파일
 PC_GEN_C := $(PC_SRCS:.pc=.c)
 
-# 전체 .c 파일 (main.c + 생성된 .c)
-ALL_C    := $(SRC_DIR)/main.c $(PC_GEN_C)
+# 전체 .c 파일 (main.c + logger.c + 생성된 .c)
+ALL_C    := $(SRC_DIR)/main.c $(SRC_DIR)/logger.c $(PC_GEN_C)
 
 # 오브젝트 파일
 OBJS     := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(ALL_C))
@@ -46,12 +46,13 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 # ── .pc → .c : Docker 내부 proc로 프리컴파일 ──
-$(SRC_DIR)/%.c: $(SRC_DIR)/%.pc include/cstock.h
+$(SRC_DIR)/%.c: $(SRC_DIR)/%.pc include/cstock.h include/logger.h
 	@echo ""
 	@echo ">>> [PROC] 프리컴파일: $< → $@"
 	@# 1) .pc 파일과 커스텀 헤더를 컨테이너 /tmp 로 복사
-	docker cp $<              $(ORACLE_CTR):/tmp/$(notdir $<)
+	docker cp $<               $(ORACLE_CTR):/tmp/$(notdir $<)
 	docker cp include/cstock.h $(ORACLE_CTR):/tmp/cstock.h
+	docker cp include/logger.h $(ORACLE_CTR):/tmp/logger.h
 	@# 2) proc 실행 (출력 파일명 명시)
 	docker exec $(ORACLE_CTR) bash -c \
 		"export LD_LIBRARY_PATH=$(ORACLE_HOME_CTR)/lib && \
@@ -63,7 +64,7 @@ $(SRC_DIR)/%.c: $(SRC_DIR)/%.pc include/cstock.h
 	@# 3) 생성된 .c 를 호스트로 복사, 컨테이너 임시 파일 정리
 	docker cp $(ORACLE_CTR):/tmp/$(notdir $@) $@
 	docker exec --user root $(ORACLE_CTR) bash -c \
-		"rm -f /tmp/$(notdir $<) /tmp/$(notdir $@) /tmp/cstock.h"
+		"rm -f /tmp/$(notdir $<) /tmp/$(notdir $@) /tmp/cstock.h /tmp/logger.h"
 	@echo ">>> [PROC] 완료: $@"
 
 # ── .c → .o : GCC 컴파일 ──

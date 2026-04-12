@@ -1,0 +1,32 @@
+# ==============================================================
+# docker-compose.yml — C-Stock ATM 컨테이너 환경 명세
+#
+# Oracle 21c XE 컨테이너를 관리합니다.
+# 사용법:
+#   docker compose up -d      # 컨테이너 기동
+#   docker compose down       # 컨테이너 종료
+#   docker compose logs -f    # 로그 실시간 확인
+# ==============================================================
+
+services:
+  oracle21c:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: oracle21c
+    environment:
+      ORACLE_PASSWORD: Password123!
+      ORACLE_DATABASE: xepdb1
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  oracle_data:
+    driver: local

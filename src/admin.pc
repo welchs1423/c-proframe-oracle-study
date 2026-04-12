@@ -88,6 +88,9 @@ void unlock_account(void) {
     EXEC SQL COMMIT;
 
     trim_string(adm_acc_no, 20);
+    char log_msg_ul[128];
+    snprintf(log_msg_ul, sizeof(log_msg_ul), "[관리자] 계좌 잠금 해제: %s", adm_acc_no);
+    write_log(LOG_INFO, log_msg_ul);
     printf("[성공] 계좌(%s)의 잠금이 해제되었습니다.\n", adm_acc_no);
 }
 
@@ -114,6 +117,9 @@ void grant_vip(void) {
     EXEC SQL COMMIT;
 
     trim_string(adm_acc_no, 20);
+    char log_msg_vip[128];
+    snprintf(log_msg_vip, sizeof(log_msg_vip), "[관리자] VIP 등급 부여: %s", adm_acc_no);
+    write_log(LOG_INFO, log_msg_vip);
     printf("[성공] 계좌(%s)가 VIP 등급으로 승급되었습니다.\n", adm_acc_no);
 }
 
@@ -149,6 +155,10 @@ void grant_credit(void) {
 
     format_comma(new_limit, limit_str);
     trim_string(adm_acc_no, 20);
+    char log_msg_cr[128];
+    snprintf(log_msg_cr, sizeof(log_msg_cr),
+             "[관리자] 마이너스 한도 설정: %s → %s원", adm_acc_no, limit_str);
+    write_log(LOG_INFO, log_msg_cr);
     printf("[성공] 계좌(%s)의 마이너스 한도가 %s원으로 설정되었습니다.\n",
            adm_acc_no, limit_str);
 }
@@ -201,6 +211,10 @@ void pay_interest(void) {
     EXEC SQL WHENEVER NOT FOUND CONTINUE;
 
     EXEC SQL COMMIT;
+    char log_msg_int[128];
+    snprintf(log_msg_int, sizeof(log_msg_int),
+             "[관리자] 일괄 이자 지급 완료: 총 %d개 계좌 (연 5%%)", count);
+    write_log(LOG_INFO, log_msg_int);
     printf("--------------------------------------------------\n");
     printf("[완료] 총 %d개 계좌에 이자가 지급되었습니다.\n", count);
 }

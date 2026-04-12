@@ -9,6 +9,7 @@ int main(void) {
     int choice;
     SessionState sess;
 
+    write_log(LOG_INFO, "========== C-Stock ATM 시스템 시작 ==========");
     printf("1. 시스템 부팅 중...\n");
     connect_db();
 
@@ -23,6 +24,7 @@ int main(void) {
         scanf("%d", &choice);
 
         if (choice == 3) {
+            write_log(LOG_INFO, "========== C-Stock ATM 시스템 종료 ==========");
             printf("[시스템] 안전하게 종료합니다.\n");
             break;
         }

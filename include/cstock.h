@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "logger.h"
 
 /* =========================================
    세션 상태 구조체 (로그인 후 유지되는 데이터)

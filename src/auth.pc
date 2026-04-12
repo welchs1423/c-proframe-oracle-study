@@ -37,11 +37,22 @@ void create_account(void) {
              VALUES (:s_acc_no, :s_user_name, 0, :s_n_pw, 'U');
 
     if (sqlca.sqlcode == -1) {
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 실패] 중복 계좌번호: %s", s_acc_no);
+        write_log(LOG_WARN, log_msg);
         printf("[실패] 이미 존재하는 계좌번호입니다.\n");
     } else if (sqlca.sqlcode != 0) {
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 오류] 계좌: %s, DB 에러코드: %d",
+                 s_acc_no, sqlca.sqlcode);
+        write_log(LOG_ERROR, log_msg);
         printf("[실패] 개설 중 DB 오류 (에러코드: %d)\n", sqlca.sqlcode);
     } else {
         EXEC SQL COMMIT;
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 성공] 계좌: %s, 고객명: %s",
+                 s_acc_no, (char *)s_user_name.arr);
+        write_log(LOG_INFO, log_msg);
         printf("[성공] %s님의 신규 계좌(%s) 개설 완료!\n",
                s_user_name.arr, s_acc_no);
     }
@@ -60,6 +71,9 @@ int login(SessionState *sess) {
              FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
 
     if (sqlca.sqlcode == 1403) {
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "[로그인 실패] 존재하지 않는 계좌: %s", s_acc_no);
+        write_log(LOG_WARN, log_msg);
         printf("[실패] 존재하지 않는 계좌입니다.\n");
         return 0;
     }
@@ -67,6 +81,9 @@ int login(SessionState *sess) {
     /* [1] 계좌 잠금 여부 선확인 */
     trim_string(s_is_locked, 2);
     if (s_is_locked[0] == 'Y') {
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "[로그인 차단] 잠긴 계좌 접근 시도: %s", s_acc_no);
+        write_log(LOG_WARN, log_msg);
         printf("[잠금] 비밀번호 오류 횟수 초과로 잠긴 계좌입니다. 관리자에게 문의하세요.\n");
         return 0;
     }
@@ -84,10 +101,18 @@ int login(SessionState *sess) {
         if (s_fail_cnt >= 3) {
             EXEC SQL UPDATE ACCOUNT SET IS_LOCKED = 'Y' WHERE ACC_NO = :s_acc_no;
             EXEC SQL COMMIT;
+            char log_msg[128];
+            snprintf(log_msg, sizeof(log_msg),
+                     "[계좌 잠금] 비밀번호 %d회 오류 → 계좌 잠금: %s", s_fail_cnt, s_acc_no);
+            write_log(LOG_WARN, log_msg);
             printf("[잠금] 비밀번호를 %d회 틀렸습니다. 계좌가 잠겼습니다. 관리자에게 문의하세요.\n",
                    s_fail_cnt);
         } else {
             EXEC SQL COMMIT;
+            char log_msg[128];
+            snprintf(log_msg, sizeof(log_msg),
+                     "[로그인 실패] 비밀번호 불일치: %s (오류 횟수: %d/3)", s_acc_no, s_fail_cnt);
+            write_log(LOG_WARN, log_msg);
             printf("[실패] 비밀번호 불일치 (오류 횟수: %d/3)\n", s_fail_cnt);
         }
         return 0;
@@ -107,6 +132,10 @@ int login(SessionState *sess) {
     strncpy(sess->db_grade,  s_db_grade,             11); sess->db_grade[11]  = '\0';
     sess->credit_limit = s_credit_limit;
 
+    char log_msg[128];
+    snprintf(log_msg, sizeof(log_msg), "[로그인 성공] 계좌: %s, 고객명: %s, 등급: %s",
+             sess->acc_no, sess->user_name, sess->db_grade);
+    write_log(LOG_INFO, log_msg);
     printf("\n[환영합니다] %s님 접속 성공! (등급: %s)\n",
            sess->user_name, sess->db_grade);
 
@@ -183,6 +212,10 @@ int delete_account(SessionState *sess) {
     EXEC SQL DELETE FROM ACCOUNT WHERE ACC_NO = :s_acc_no;
     EXEC SQL COMMIT;
 
+    char log_msg[128];
+    snprintf(log_msg, sizeof(log_msg), "[계좌 해지] 계좌: %s, 고객명: %s",
+             sess->acc_no, sess->user_name);
+    write_log(LOG_INFO, log_msg);
     printf("[성공] 계좌(%s)가 정상적으로 해지되었습니다. 그동안 이용해 주셔서 감사합니다.\n",
            sess->acc_no);
     return 1;
