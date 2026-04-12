@@ -1,0 +1,882 @@
+#include "cstock.h"
+#include "protocol.h"
+#include "server_handlers.h"
+#define SQLCA_STORAGE_CLASS extern
+#include <sqlca.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* =========================================
+   [server_handlers.pc]
+   클라이언트 요청 패킷을 받아 DB를 처리하고
+   응답 패킷을 send() 로 돌려보내는 핸들러 모음.
+   sqlca는 db_util.pc에서 선언된 extern을 공유.
+   ========================================= */
+
+EXEC SQL BEGIN DECLARE SECTION;
+    /* 공통 */
+    char    h_acc_no[21];
+    /* 인증 */
+    VARCHAR h_user_name[41];
+    char    h_passwd[16];
+    char    h_new_pw[16];
+    char    h_role[2];
+    char    h_grade[12];
+    long    h_credit_limit;
+    char    h_is_locked[2];
+    int     h_fail_cnt;
+    long    h_balance;
+    long    h_savings_balance;
+    /* 뱅킹 */
+    long    h_amount;
+    long    h_total_deduct;
+    char    h_target_acc[21];
+    VARCHAR h_target_name[41];
+    long    h_target_bal;
+    /* 거래 내역 */
+    char    h_h_acc_no[21];
+    char    h_h_trans_type[21];
+    long    h_h_amount;
+    long    h_h_balance_after;
+    char    h_h_trans_date[31];
+    /* 관리자 */
+    VARCHAR h_adm_user_name[41];
+    char    h_adm_acc_no[21];
+    long    h_adm_balance;
+    char    h_adm_grade[12];
+    long    h_adm_savings_balance;
+    long    h_adm_amount;
+    long    h_adm_a_balance;
+    char    h_adm_is_locked[2];
+    /* 통계 */
+    long    h_stat_accounts;
+    long    h_stat_total_bal;
+    long    h_stat_overdraft;
+    long    h_stat_vip;
+EXEC SQL END DECLARE SECTION;
+
+/* ────────────────────────────────────────
+   내부 유틸리티
+   ──────────────────────────────────────── */
+static void send_pkt(int fd, Packet *p) {
+    send(fd, p, sizeof(Packet), 0);
+}
+
+static void ok_msg(int fd, int type, const char *msg) {
+    Packet res;
+    memset(&res, 0, sizeof(res));
+    res.type   = type;
+    res.result = RES_OK;
+    if (msg) strncpy(res.data, msg, sizeof(res.data) - 1);
+    send_pkt(fd, &res);
+}
+
+static void fail_msg(int fd, int type, int code, const char *msg) {
+    Packet res;
+    memset(&res, 0, sizeof(res));
+    res.type   = type;
+    res.result = code;
+    if (msg) strncpy(res.data, msg, sizeof(res.data) - 1);
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   로그인
+   req.acc_no : 계좌번호
+   req.extra  : 비밀번호
+   res.data   : "user_name|grade|credit_limit" (성공 시)
+   res.result : RES_OK(고객) / RES_ADMIN / RES_FAIL / RES_LOCKED / RES_NOT_FOUND
+   ──────────────────────────────────────── */
+void srv_login(int fd, Packet *req) {
+    char log_msg[200];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL SELECT USER_NAME, PASSWD, ROLE, IS_LOCKED, FAIL_CNT, GRADE, CREDIT_LIMIT
+             INTO :h_user_name, :h_passwd, :h_role,
+                  :h_is_locked, :h_fail_cnt, :h_grade, :h_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        snprintf(log_msg, sizeof(log_msg), "[로그인 실패] 존재하지 않는 계좌: %s", h_acc_no);
+        write_log(LOG_WARN, log_msg);
+        fail_msg(fd, PKT_LOGIN, RES_NOT_FOUND, "[실패] 존재하지 않는 계좌입니다.");
+        return;
+    }
+    if (sqlca.sqlcode != 0) {
+        fail_msg(fd, PKT_LOGIN, RES_DB_ERROR, "[오류] DB 조회 중 오류가 발생했습니다.");
+        return;
+    }
+
+    trim_string(h_is_locked, 2);
+    if (h_is_locked[0] == 'Y') {
+        snprintf(log_msg, sizeof(log_msg), "[로그인 차단] 잠긴 계좌: %s", h_acc_no);
+        write_log(LOG_WARN, log_msg);
+        fail_msg(fd, PKT_LOGIN, RES_LOCKED,
+                 "[잠금] 비밀번호 오류 횟수 초과로 잠긴 계좌입니다. 관리자에게 문의하세요.");
+        return;
+    }
+
+    trim_string(h_passwd, 15);
+    if (strcmp(req->extra, h_passwd) != 0) {
+        EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = FAIL_CNT + 1 WHERE ACC_NO = :h_acc_no;
+        EXEC SQL SELECT FAIL_CNT INTO :h_fail_cnt FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+        if (h_fail_cnt >= 3) {
+            EXEC SQL UPDATE ACCOUNT SET IS_LOCKED = 'Y' WHERE ACC_NO = :h_acc_no;
+            EXEC SQL COMMIT;
+            snprintf(log_msg, sizeof(log_msg),
+                     "[계좌 잠금] 비밀번호 %d회 오류: %s", h_fail_cnt, h_acc_no);
+            write_log(LOG_WARN, log_msg);
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "[잠금] 비밀번호를 %d회 틀렸습니다. 계좌가 잠겼습니다. 관리자에게 문의하세요.",
+                     h_fail_cnt);
+            fail_msg(fd, PKT_LOGIN, RES_LOCKED, msg);
+        } else {
+            EXEC SQL COMMIT;
+            snprintf(log_msg, sizeof(log_msg),
+                     "[로그인 실패] 비밀번호 불일치: %s (오류 횟수: %d/3)", h_acc_no, h_fail_cnt);
+            write_log(LOG_WARN, log_msg);
+            char msg[128];
+            snprintf(msg, sizeof(msg), "[실패] 비밀번호 불일치 (오류 횟수: %d/3)", h_fail_cnt);
+            fail_msg(fd, PKT_LOGIN, RES_FAIL, msg);
+        }
+        return;
+    }
+
+    /* 로그인 성공 → FAIL_CNT 초기화 */
+    EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = 0 WHERE ACC_NO = :h_acc_no;
+    EXEC SQL COMMIT;
+
+    h_user_name.arr[h_user_name.len] = '\0';
+    trim_string(h_grade, 11);
+    trim_string(h_acc_no, 20);
+
+    snprintf(log_msg, sizeof(log_msg), "[로그인 성공] 계좌: %s, 고객명: %s, 등급: %s",
+             h_acc_no, (char *)h_user_name.arr, h_grade);
+    write_log(LOG_INFO, log_msg);
+
+    Packet res;
+    memset(&res, 0, sizeof(res));
+    res.type = PKT_LOGIN;
+    /* data = "user_name|grade|credit_limit" */
+    snprintf(res.data, sizeof(res.data), "%s|%s|%ld",
+             (char *)h_user_name.arr, h_grade, h_credit_limit);
+    res.result = (h_role[0] == 'A') ? RES_ADMIN : RES_OK;
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   계좌 개설
+   req.acc_no : 희망 계좌번호
+   req.extra  : 고객명
+   req.extra2 : 초기 비밀번호
+   ──────────────────────────────────────── */
+void srv_create_account(int fd, Packet *req) {
+    VARCHAR h_new_user[41];
+    char log_msg[200];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+    strncpy((char *)h_new_user.arr, req->extra, 40);
+    h_new_user.arr[40] = '\0';
+    h_new_user.len = strlen((char *)h_new_user.arr);
+    strncpy(h_new_pw, req->extra2, 15);
+    h_new_pw[15] = '\0';
+
+    EXEC SQL INSERT INTO ACCOUNT (ACC_NO, USER_NAME, BALANCE, PASSWD, ROLE)
+             VALUES (:h_acc_no, :h_new_user, 0, :h_new_pw, 'U');
+
+    if (sqlca.sqlcode == -1) {
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 실패] 중복 계좌번호: %s", h_acc_no);
+        write_log(LOG_WARN, log_msg);
+        fail_msg(fd, PKT_CREATE_ACCOUNT, RES_FAIL, "[실패] 이미 존재하는 계좌번호입니다.");
+    } else if (sqlca.sqlcode != 0) {
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 오류] 계좌: %s, DB 에러코드: %d",
+                 h_acc_no, sqlca.sqlcode);
+        write_log(LOG_ERROR, log_msg);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[실패] 개설 중 DB 오류 (에러코드: %d)", sqlca.sqlcode);
+        fail_msg(fd, PKT_CREATE_ACCOUNT, RES_DB_ERROR, msg);
+    } else {
+        EXEC SQL COMMIT;
+        trim_string(h_acc_no, 20);
+        snprintf(log_msg, sizeof(log_msg), "[계좌 개설 성공] 계좌: %s, 고객명: %s",
+                 h_acc_no, (char *)h_new_user.arr);
+        write_log(LOG_INFO, log_msg);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[성공] %s님의 신규 계좌(%s) 개설 완료!",
+                 (char *)h_new_user.arr, h_acc_no);
+        ok_msg(fd, PKT_CREATE_ACCOUNT, msg);
+    }
+}
+
+/* ────────────────────────────────────────
+   잔액 조회
+   req.acc_no : 계좌번호
+   res.data   : "balance|savings|credit_limit"
+   ──────────────────────────────────────── */
+void srv_check_balance(int fd, Packet *req) {
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT, SAVINGS_BALANCE
+             INTO :h_balance, :h_credit_limit, :h_savings_balance
+             FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if (sqlca.sqlcode != 0) {
+        fail_msg(fd, PKT_CHECK_BALANCE, RES_DB_ERROR, "[오류] 잔액 조회 실패");
+        return;
+    }
+
+    Packet res;
+    memset(&res, 0, sizeof(res));
+    res.type   = PKT_CHECK_BALANCE;
+    res.result = RES_OK;
+    snprintf(res.data, sizeof(res.data), "%ld|%ld|%ld",
+             h_balance, h_savings_balance, h_credit_limit);
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   입금
+   req.acc_no : 계좌번호
+   req.amount : 입금액
+   ──────────────────────────────────────── */
+void srv_deposit(int fd, Packet *req) {
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+    h_amount = req->amount;
+
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :h_amount WHERE ACC_NO = :h_acc_no;
+    EXEC SQL SELECT BALANCE INTO :h_balance FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    strncpy(h_h_acc_no, h_acc_no, 20);
+    strcpy(h_h_trans_type, "입금");
+    h_h_amount        = h_amount;
+    h_h_balance_after = h_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[%ld원] 입금 완료.", h_amount);
+    ok_msg(fd, PKT_DEPOSIT, msg);
+}
+
+/* ────────────────────────────────────────
+   출금
+   req.acc_no : 계좌번호
+   req.amount : 출금액
+   ──────────────────────────────────────── */
+void srv_withdraw(int fd, Packet *req) {
+    char avail_str[50], bal_str[50], log_msg[200];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+    h_amount = req->amount;
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT
+             INTO :h_balance, :h_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if ((h_balance + h_credit_limit) < h_amount) {
+        format_comma(h_balance + h_credit_limit, avail_str);
+        snprintf(log_msg, sizeof(log_msg),
+                 "[출금 실패] 한도 초과: 계좌 %s, 요청 %ld원, 가용 %s원",
+                 h_acc_no, h_amount, avail_str);
+        write_log(LOG_WARN, log_msg);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[실패] 한도 초과. 출금 가능 금액: %s원", avail_str);
+        fail_msg(fd, PKT_WITHDRAW, RES_FAIL, msg);
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :h_amount WHERE ACC_NO = :h_acc_no;
+    h_balance -= h_amount;
+
+    strncpy(h_h_acc_no, h_acc_no, 20);
+    strcpy(h_h_trans_type, "출금");
+    h_h_amount        = h_amount;
+    h_h_balance_after = h_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    format_comma(h_balance, bal_str);
+    snprintf(log_msg, sizeof(log_msg),
+             "[출금 완료] 계좌: %s, 금액: %ld원, 잔액: %s원", h_acc_no, h_amount, bal_str);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[%ld원] 출금 완료. 현재 잔액: %s원", h_amount, bal_str);
+    ok_msg(fd, PKT_WITHDRAW, msg);
+}
+
+/* ────────────────────────────────────────
+   계좌 이체
+   req.acc_no : 송신 계좌번호
+   req.extra  : 수신 계좌번호
+   req.amount : 이체 금액
+   req.extra2 : 등급 ("NORMAL" or "VIP")
+   ──────────────────────────────────────── */
+void srv_transfer(int fd, Packet *req) {
+    long fee = 0;
+    char fee_str[50], avail_str[50], log_msg[200];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+    strncpy(h_target_acc, req->extra, 20);
+    h_target_acc[20] = '\0';
+    h_amount = req->amount;
+
+    /* 수신 계좌 존재 확인 */
+    EXEC SQL SELECT USER_NAME INTO :h_target_name
+             FROM ACCOUNT WHERE ACC_NO = :h_target_acc;
+
+    if (sqlca.sqlcode == 1403) {
+        fail_msg(fd, PKT_TRANSFER, RES_NOT_FOUND, "[실패] 존재하지 않는 계좌입니다.");
+        return;
+    }
+
+    /* NORMAL 등급: 수수료 500원 */
+    if (strcmp(req->extra2, "NORMAL") == 0) fee = 500;
+
+    EXEC SQL SELECT BALANCE, CREDIT_LIMIT
+             INTO :h_balance, :h_credit_limit
+             FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if ((h_balance + h_credit_limit) < h_amount + fee) {
+        format_comma(h_balance + h_credit_limit, avail_str);
+        snprintf(log_msg, sizeof(log_msg),
+                 "[이체 실패] 한도 초과: 계좌 %s → %s, 요청 %ld원(수수료 %ld원 포함)",
+                 h_acc_no, h_target_acc, h_amount, fee);
+        write_log(LOG_WARN, log_msg);
+        char msg[256];
+        if (fee > 0)
+            snprintf(msg, sizeof(msg),
+                     "[실패] 한도 초과 (수수료 500원 포함). 이체 가능 금액: %s원, 요청: %ld원",
+                     avail_str, h_amount + fee);
+        else
+            snprintf(msg, sizeof(msg),
+                     "[실패] 한도 초과. 이체 가능 금액: %s원", avail_str);
+        fail_msg(fd, PKT_TRANSFER, RES_FAIL, msg);
+        return;
+    }
+
+    /* 송신 계좌 차감 */
+    h_total_deduct = h_amount + fee;
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE - :h_total_deduct WHERE ACC_NO = :h_acc_no;
+    h_balance -= h_total_deduct;
+
+    strncpy(h_h_acc_no, h_acc_no, 20);
+    strcpy(h_h_trans_type, "이체출금");
+    h_h_amount        = h_amount;
+    h_h_balance_after = h_balance;
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+    if (fee > 0) {
+        strncpy(h_h_acc_no, h_acc_no, 20);
+        strcpy(h_h_trans_type, "수수료");
+        h_h_amount        = fee;
+        h_h_balance_after = h_balance;
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+    }
+
+    /* 수신 계좌 입금 */
+    EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :h_amount WHERE ACC_NO = :h_target_acc;
+    EXEC SQL SELECT BALANCE INTO :h_target_bal FROM ACCOUNT WHERE ACC_NO = :h_target_acc;
+
+    strncpy(h_h_acc_no, h_target_acc, 20);
+    strcpy(h_h_trans_type, "이체입금");
+    h_h_amount        = h_amount;
+    h_h_balance_after = h_target_bal;
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    h_target_name.arr[h_target_name.len] = '\0';
+    snprintf(log_msg, sizeof(log_msg),
+             "[이체 완료] 계좌 %s → %s(%s), 금액: %ld원, 수수료: %ld원",
+             h_acc_no, h_target_acc, (char *)h_target_name.arr, h_amount, fee);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[256];
+    if (fee > 0) {
+        format_comma(fee, fee_str);
+        snprintf(msg, sizeof(msg), "[%s]님에게 %ld원 이체 완료. (수수료 %s원 차감)",
+                 (char *)h_target_name.arr, h_amount, fee_str);
+    } else {
+        snprintf(msg, sizeof(msg), "[%s]님에게 %ld원 이체 완료. (VIP — 수수료 없음)",
+                 (char *)h_target_name.arr, h_amount);
+    }
+    ok_msg(fd, PKT_TRANSFER, msg);
+}
+
+/* ────────────────────────────────────────
+   거래 내역 조회 (스트리밍)
+   req.acc_no : 계좌번호
+   서버는 행마다 RES_MORE_DATA 패킷 전송,
+   마지막에 RES_END_DATA 패킷 전송.
+   res.data 포맷: "trans_date|trans_type|amount|balance_after"
+   ──────────────────────────────────────── */
+void srv_view_history(int fd, Packet *req) {
+    Packet res;
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL DECLARE srv_hist_cursor CURSOR FOR
+        SELECT TRANS_TYPE, AMOUNT, BALANCE_AFTER,
+               TO_CHAR(TRANS_DATE, 'YYYY-MM-DD HH24:MI:SS')
+        FROM HISTORY WHERE ACC_NO = :h_acc_no ORDER BY SEQ DESC;
+
+    EXEC SQL OPEN srv_hist_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH srv_hist_cursor
+                 INTO :h_h_trans_type, :h_h_amount, :h_h_balance_after, :h_h_trans_date;
+
+        trim_string(h_h_trans_type, 20);
+        trim_string(h_h_trans_date, 30);
+
+        memset(&res, 0, sizeof(res));
+        res.type   = PKT_VIEW_HISTORY;
+        res.result = RES_MORE_DATA;
+        snprintf(res.data, sizeof(res.data), "%s|%s|%ld|%ld",
+                 h_h_trans_date, h_h_trans_type, h_h_amount, h_h_balance_after);
+        send_pkt(fd, &res);
+    }
+
+    EXEC SQL CLOSE srv_hist_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    /* 종료 패킷 */
+    memset(&res, 0, sizeof(res));
+    res.type   = PKT_VIEW_HISTORY;
+    res.result = RES_END_DATA;
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   거래 내역 CSV 다운로드 (스트리밍)
+   포맷: "trans_date|trans_type|amount|balance_after"
+   ──────────────────────────────────────── */
+void srv_download_csv(int fd, Packet *req) {
+    Packet res;
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL DECLARE srv_csv_cursor CURSOR FOR
+        SELECT TO_CHAR(TRANS_DATE, 'YYYY-MM-DD HH24:MI:SS'),
+               TRANS_TYPE, AMOUNT, BALANCE_AFTER
+        FROM HISTORY WHERE ACC_NO = :h_acc_no ORDER BY SEQ DESC;
+
+    EXEC SQL OPEN srv_csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH srv_csv_cursor
+                 INTO :h_h_trans_date, :h_h_trans_type, :h_h_amount, :h_h_balance_after;
+
+        trim_string(h_h_trans_date, 30);
+        trim_string(h_h_trans_type, 20);
+
+        memset(&res, 0, sizeof(res));
+        res.type   = PKT_DOWNLOAD_CSV;
+        res.result = RES_MORE_DATA;
+        snprintf(res.data, sizeof(res.data), "%s|%s|%ld|%ld",
+                 h_h_trans_date, h_h_trans_type, h_h_amount, h_h_balance_after);
+        send_pkt(fd, &res);
+    }
+
+    EXEC SQL CLOSE srv_csv_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    memset(&res, 0, sizeof(res));
+    res.type   = PKT_DOWNLOAD_CSV;
+    res.result = RES_END_DATA;
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   비밀번호 변경
+   req.acc_no : 계좌번호
+   req.extra  : 현재 비밀번호
+   req.extra2 : 새 비밀번호
+   ──────────────────────────────────────── */
+void srv_change_password(int fd, Packet *req) {
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL SELECT PASSWD INTO :h_passwd FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+    trim_string(h_passwd, 15);
+
+    if (strcmp(req->extra, h_passwd) != 0) {
+        fail_msg(fd, PKT_CHANGE_PASSWORD, RES_FAIL, "[실패] 현재 비밀번호 오류");
+        return;
+    }
+
+    strncpy(h_new_pw, req->extra2, 15);
+    h_new_pw[15] = '\0';
+
+    EXEC SQL UPDATE ACCOUNT SET PASSWD = :h_new_pw WHERE ACC_NO = :h_acc_no;
+    EXEC SQL COMMIT;
+    ok_msg(fd, PKT_CHANGE_PASSWORD, "[성공] 비밀번호가 변경되었습니다.");
+}
+
+/* ────────────────────────────────────────
+   계좌 해지
+   req.acc_no : 계좌번호
+   req.extra  : 비밀번호
+   ──────────────────────────────────────── */
+void srv_delete_account(int fd, Packet *req) {
+    char bal_str[50], log_msg[200];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+
+    EXEC SQL SELECT BALANCE INTO :h_balance FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if (h_balance != 0) {
+        format_comma(h_balance, bal_str);
+        char msg[256];
+        if (h_balance > 0)
+            snprintf(msg, sizeof(msg),
+                     "[실패] 잔액이 남아있습니다. 전액 출금 후 해지해주세요. (현재 잔액: %s원)",
+                     bal_str);
+        else
+            snprintf(msg, sizeof(msg),
+                     "[실패] 마이너스 잔액이 남아있습니다. 전액 입금 후 해지해주세요. (현재 잔액: %s원)",
+                     bal_str);
+        fail_msg(fd, PKT_DELETE_ACCOUNT, RES_FAIL, msg);
+        return;
+    }
+
+    EXEC SQL SELECT PASSWD INTO :h_passwd FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+    trim_string(h_passwd, 15);
+
+    if (strcmp(req->extra, h_passwd) != 0) {
+        fail_msg(fd, PKT_DELETE_ACCOUNT, RES_FAIL, "[실패] 비밀번호가 일치하지 않습니다.");
+        return;
+    }
+
+    EXEC SQL DELETE FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+    EXEC SQL COMMIT;
+
+    snprintf(log_msg, sizeof(log_msg), "[계좌 해지] 계좌: %s", h_acc_no);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "[성공] 계좌(%s)가 정상적으로 해지되었습니다. 그동안 이용해 주셔서 감사합니다.",
+             h_acc_no);
+    ok_msg(fd, PKT_DELETE_ACCOUNT, msg);
+}
+
+/* ────────────────────────────────────────
+   정기 예금 가입
+   req.acc_no : 계좌번호
+   req.amount : 예금 금액
+   ──────────────────────────────────────── */
+void srv_deposit_savings(int fd, Packet *req) {
+    char bal_str[50], savings_str[50];
+
+    strncpy(h_acc_no, req->acc_no, 20);
+    h_acc_no[20] = '\0';
+    h_amount = req->amount;
+
+    EXEC SQL SELECT BALANCE, SAVINGS_BALANCE
+             INTO :h_balance, :h_savings_balance
+             FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    if (h_amount <= 0) {
+        fail_msg(fd, PKT_DEPOSIT_SAVINGS, RES_FAIL, "[실패] 0원 이하는 입금할 수 없습니다.");
+        return;
+    }
+    if (h_balance < h_amount) {
+        format_comma(h_balance, bal_str);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[실패] 일반 잔액이 부족합니다. (현재 잔액: %s원)", bal_str);
+        fail_msg(fd, PKT_DEPOSIT_SAVINGS, RES_FAIL, msg);
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT
+             SET BALANCE         = BALANCE         - :h_amount,
+                 SAVINGS_BALANCE = SAVINGS_BALANCE + :h_amount
+             WHERE ACC_NO = :h_acc_no;
+
+    EXEC SQL SELECT BALANCE INTO :h_balance FROM ACCOUNT WHERE ACC_NO = :h_acc_no;
+
+    strncpy(h_h_acc_no, h_acc_no, 20);
+    strcpy(h_h_trans_type, "예금입금");
+    h_h_amount        = h_amount;
+    h_h_balance_after = h_balance;
+
+    EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+             VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+    EXEC SQL COMMIT;
+
+    format_comma(h_amount, bal_str);
+    format_comma(h_savings_balance + h_amount, savings_str);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "[성공] %s원이 정기 예금에 입금되었습니다. (누적 예금 잔액: %s원)",
+             bal_str, savings_str);
+    ok_msg(fd, PKT_DEPOSIT_SAVINGS, msg);
+}
+
+/* ──────────────────────────────────────────────
+   관리자: 전체 계좌 현황 조회 (스트리밍)
+   res.data 포맷: "acc_no|user_name|grade|balance"
+   ────────────────────────────────────────────── */
+void srv_admin_view_accounts(int fd, Packet *req) {
+    Packet res;
+    char balance_str[50];
+
+    EXEC SQL DECLARE srv_acc_cursor CURSOR FOR
+        SELECT ACC_NO, USER_NAME, BALANCE, GRADE FROM ACCOUNT ORDER BY ACC_NO;
+
+    EXEC SQL OPEN srv_acc_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH srv_acc_cursor
+                 INTO :h_adm_acc_no, :h_adm_user_name, :h_adm_balance, :h_adm_grade;
+
+        h_adm_user_name.arr[h_adm_user_name.len] = '\0';
+        trim_string(h_adm_acc_no, 20);
+        trim_string(h_adm_grade, 11);
+        format_comma(h_adm_balance, balance_str);
+
+        memset(&res, 0, sizeof(res));
+        res.type   = PKT_ADMIN_VIEW;
+        res.result = RES_MORE_DATA;
+        snprintf(res.data, sizeof(res.data), "%s|%s|%s|%s",
+                 h_adm_acc_no, (char *)h_adm_user_name.arr, h_adm_grade, balance_str);
+        send_pkt(fd, &res);
+    }
+
+    EXEC SQL CLOSE srv_acc_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    memset(&res, 0, sizeof(res));
+    res.type   = PKT_ADMIN_VIEW;
+    res.result = RES_END_DATA;
+    send_pkt(fd, &res);
+}
+
+/* ────────────────────────────────────────
+   관리자: 잠긴 계좌 해제
+   req.acc_no : 대상 계좌번호
+   ──────────────────────────────────────── */
+void srv_unlock_account(int fd, Packet *req) {
+    char log_msg[200];
+
+    strncpy(h_adm_acc_no, req->acc_no, 20);
+    h_adm_acc_no[20] = '\0';
+
+    EXEC SQL SELECT IS_LOCKED INTO :h_adm_is_locked
+             FROM ACCOUNT WHERE ACC_NO = :h_adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        fail_msg(fd, PKT_UNLOCK_ACCOUNT, RES_NOT_FOUND, "[실패] 존재하지 않는 계좌입니다.");
+        return;
+    }
+
+    trim_string(h_adm_is_locked, 2);
+    if (h_adm_is_locked[0] != 'Y') {
+        fail_msg(fd, PKT_UNLOCK_ACCOUNT, RES_FAIL, "[안내] 해당 계좌는 잠긴 상태가 아닙니다.");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET FAIL_CNT = 0, IS_LOCKED = 'N'
+             WHERE ACC_NO = :h_adm_acc_no;
+    EXEC SQL COMMIT;
+
+    trim_string(h_adm_acc_no, 20);
+    snprintf(log_msg, sizeof(log_msg), "[관리자] 계좌 잠금 해제: %s", h_adm_acc_no);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[성공] 계좌(%s)의 잠금이 해제되었습니다.", h_adm_acc_no);
+    ok_msg(fd, PKT_UNLOCK_ACCOUNT, msg);
+}
+
+/* ────────────────────────────────────────
+   관리자: VIP 등급 부여
+   req.acc_no : 대상 계좌번호
+   ──────────────────────────────────────── */
+void srv_grant_vip(int fd, Packet *req) {
+    char log_msg[200];
+
+    strncpy(h_adm_acc_no, req->acc_no, 20);
+    h_adm_acc_no[20] = '\0';
+
+    EXEC SQL SELECT GRADE INTO :h_adm_grade FROM ACCOUNT WHERE ACC_NO = :h_adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        fail_msg(fd, PKT_GRANT_VIP, RES_NOT_FOUND, "[실패] 존재하지 않는 계좌입니다.");
+        return;
+    }
+
+    trim_string(h_adm_grade, 11);
+    if (strcmp(h_adm_grade, "VIP") == 0) {
+        fail_msg(fd, PKT_GRANT_VIP, RES_FAIL, "[안내] 해당 계좌는 이미 VIP 등급입니다.");
+        return;
+    }
+
+    EXEC SQL UPDATE ACCOUNT SET GRADE = 'VIP' WHERE ACC_NO = :h_adm_acc_no;
+    EXEC SQL COMMIT;
+
+    trim_string(h_adm_acc_no, 20);
+    snprintf(log_msg, sizeof(log_msg), "[관리자] VIP 등급 부여: %s", h_adm_acc_no);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[성공] 계좌(%s)가 VIP 등급으로 승급되었습니다.", h_adm_acc_no);
+    ok_msg(fd, PKT_GRANT_VIP, msg);
+}
+
+/* ────────────────────────────────────────
+   관리자: 마이너스 한도 부여
+   req.acc_no : 대상 계좌번호
+   req.amount : 새 한도
+   ──────────────────────────────────────── */
+void srv_grant_credit(int fd, Packet *req) {
+    char limit_str[50], log_msg[200];
+
+    strncpy(h_adm_acc_no, req->acc_no, 20);
+    h_adm_acc_no[20] = '\0';
+
+    EXEC SQL SELECT CREDIT_LIMIT INTO :h_adm_amount FROM ACCOUNT WHERE ACC_NO = :h_adm_acc_no;
+
+    if (sqlca.sqlcode == 1403) {
+        fail_msg(fd, PKT_GRANT_CREDIT, RES_NOT_FOUND, "[실패] 존재하지 않는 계좌입니다.");
+        return;
+    }
+
+    long new_limit = req->amount;
+    if (new_limit < 0) {
+        fail_msg(fd, PKT_GRANT_CREDIT, RES_FAIL, "[실패] 한도는 0 이상이어야 합니다.");
+        return;
+    }
+
+    h_adm_amount = new_limit;
+    EXEC SQL UPDATE ACCOUNT SET CREDIT_LIMIT = :h_adm_amount WHERE ACC_NO = :h_adm_acc_no;
+    EXEC SQL COMMIT;
+
+    format_comma(new_limit, limit_str);
+    trim_string(h_adm_acc_no, 20);
+    snprintf(log_msg, sizeof(log_msg),
+             "[관리자] 마이너스 한도 설정: %s → %s원", h_adm_acc_no, limit_str);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "[성공] 계좌(%s)의 마이너스 한도가 %s원으로 설정되었습니다.",
+             h_adm_acc_no, limit_str);
+    ok_msg(fd, PKT_GRANT_CREDIT, msg);
+}
+
+/* ────────────────────────────────────────
+   관리자: 일괄 이자 지급 (연 5%)
+   결과 요약 1개 패킷 반환
+   ──────────────────────────────────────── */
+void srv_pay_interest(int fd, Packet *req) {
+    int count = 0;
+    long interest;
+    char interest_str[50], log_msg[200];
+
+    EXEC SQL DECLARE srv_interest_cursor CURSOR FOR
+        SELECT ACC_NO, SAVINGS_BALANCE FROM ACCOUNT
+        WHERE SAVINGS_BALANCE > 0 ORDER BY ACC_NO;
+
+    EXEC SQL OPEN srv_interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+    while (1) {
+        EXEC SQL FETCH srv_interest_cursor
+                 INTO :h_adm_acc_no, :h_adm_savings_balance;
+
+        trim_string(h_adm_acc_no, 20);
+        interest = h_adm_savings_balance * 5 / 100;
+        if (interest == 0) continue;
+
+        h_adm_amount = interest;
+        EXEC SQL UPDATE ACCOUNT SET BALANCE = BALANCE + :h_adm_amount
+                 WHERE ACC_NO = :h_adm_acc_no;
+
+        EXEC SQL SELECT BALANCE INTO :h_adm_a_balance
+                 FROM ACCOUNT WHERE ACC_NO = :h_adm_acc_no;
+
+        strcpy(h_h_acc_no, h_adm_acc_no);
+        strcpy(h_h_trans_type, "이자지급");
+        h_h_amount        = interest;
+        h_h_balance_after = h_adm_a_balance;
+
+        EXEC SQL INSERT INTO HISTORY (ACC_NO, TRANS_TYPE, AMOUNT, BALANCE_AFTER)
+                 VALUES (:h_h_acc_no, :h_h_trans_type, :h_h_amount, :h_h_balance_after);
+
+        count++;
+    }
+
+    EXEC SQL CLOSE srv_interest_cursor;
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    EXEC SQL COMMIT;
+
+    snprintf(log_msg, sizeof(log_msg),
+             "[관리자] 일괄 이자 지급 완료: 총 %d개 계좌 (연 5%%)", count);
+    write_log(LOG_INFO, log_msg);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "[완료] 총 %d개 계좌에 이자가 지급되었습니다.", count);
+    ok_msg(fd, PKT_PAY_INTEREST, msg);
+}
+
+/* ────────────────────────────────────────
+   관리자: 시스템 통계 대시보드
+   res.data 포맷: "accounts|total_bal|overdraft|vip"
+   ──────────────────────────────────────── */
+void srv_system_stats(int fd, Packet *req) {
+    EXEC SQL WHENEVER NOT FOUND CONTINUE;
+
+    EXEC SQL SELECT COUNT(*) INTO :h_stat_accounts FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) h_stat_accounts = 0;
+
+    EXEC SQL SELECT NVL(SUM(BALANCE), 0) + NVL(SUM(SAVINGS_BALANCE), 0)
+             INTO :h_stat_total_bal FROM ACCOUNT;
+    if (sqlca.sqlcode != 0) h_stat_total_bal = 0;
+
+    EXEC SQL SELECT NVL(ABS(SUM(BALANCE)), 0) INTO :h_stat_overdraft
+             FROM ACCOUNT WHERE BALANCE < 0;
+    if (sqlca.sqlcode != 0) h_stat_overdraft = 0;
+
+    EXEC SQL SELECT COUNT(*) INTO :h_stat_vip FROM ACCOUNT WHERE GRADE = 'VIP';
+    if (sqlca.sqlcode != 0) h_stat_vip = 0;
+
+    Packet res;
+    memset(&res, 0, sizeof(res));
+    res.type   = PKT_SYSTEM_STATS;
+    res.result = RES_OK;
+    snprintf(res.data, sizeof(res.data), "%ld|%ld|%ld|%ld",
+             h_stat_accounts, h_stat_total_bal, h_stat_overdraft, h_stat_vip);
+    send_pkt(fd, &res);
+}
